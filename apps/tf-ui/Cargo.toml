@@ -1,0 +1,29 @@
+[package]
+name = "tf-ui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = { workspace = true }
+egui = { workspace = true }
+egui_plot = { workspace = true }
+egui_graphs = { workspace = true, features = ["events"] }
+egui_graph = { workspace = true }
+egui-file-dialog = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+petgraph = { workspace = true }
+chrono = { workspace = true }
+uom = { workspace = true }
+
+tf-core = { workspace = true }
+tf-graph = { workspace = true }
+tf-fluids = { workspace = true }
+tf-components = { workspace = true }
+tf-solver = { workspace = true }
+tf-sim = { workspace = true }
+tf-project = { workspace = true }
+tf-results = { workspace = true }
+
+[dev-dependencies]

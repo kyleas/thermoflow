@@ -1,0 +1,74 @@
+version: 1
+name: "Turbopump Demo Example"
+systems:
+  - id: s1
+    name: "Turbopump Demo"
+    fluid:
+      composition:
+        type: Pure
+        species: Oxygen
+    nodes:
+      - id: n_supply
+        name: "Supply"
+        kind:
+          type: Junction
+      - id: n_pump_out
+        name: "After Pump"
+        kind:
+          type: Junction
+      - id: n_exhaust
+        name: "Exhaust"
+        kind:
+          type: Junction
+    components:
+      - id: p1
+        name: "Main Pump"
+        kind:
+          type: Pump
+          cd: 0.8
+          area_m2: 0.0003
+          delta_p_pa: 200000.0
+          eta: 0.7
+          treat_as_liquid: true
+        from_node_id: n_supply
+        to_node_id: n_pump_out
+      - id: t1
+        name: "Drive Turbine"
+        kind:
+          type: Turbine
+          cd: 0.8
+          area_m2: 0.0003
+          eta: 0.7
+          treat_as_gas: true
+        from_node_id: n_pump_out
+        to_node_id: n_exhaust
+    boundaries:
+      - node_id: n_supply
+        pressure_pa: 200000.0
+        temperature_k: 300.0
+      - node_id: n_exhaust
+        pressure_pa: 110000.0
+        temperature_k: 300.0
+    schedules: []
+modules: []
+layouts:
+  - system_id: s1
+    nodes:
+      - node_id: n_supply
+        x: 200.0
+        y: 200.0
+      - node_id: n_pump_out
+        x: 380.0
+        y: 200.0
+      - node_id: n_exhaust
+        x: 560.0
+        y: 200.0
+    edges: []
+    overlay:
+      show_pressure: true
+      show_temperature: false
+      show_enthalpy: false
+      show_density: false
+      show_mass_flow: true
+runs:
+  runs: []

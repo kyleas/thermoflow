@@ -1,0 +1,16 @@
+[package]
+name = "tf-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tf-core = { path = "../../crates/tf-core", features = ["serde"] }
+tf-graph = { path = "../../crates/tf-graph" }
+tf-components = { path = "../../crates/tf-components" }
+tf-solver = { path = "../../crates/tf-solver" }
+serde.workspace = true
+serde_yaml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

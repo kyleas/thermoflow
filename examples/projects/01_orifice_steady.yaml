@@ -1,0 +1,55 @@
+version: 1
+name: "Orifice Steady Example"
+systems:
+  - id: s1
+    name: "Orifice Steady"
+    fluid:
+      composition:
+        type: Pure
+        species: Nitrogen
+    nodes:
+      - id: n1
+        name: "Inlet"
+        kind:
+          type: Junction
+      - id: n2
+        name: "Outlet"
+        kind:
+          type: Junction
+    components:
+      - id: c1
+        name: "Orifice"
+        kind:
+          type: Orifice
+          cd: 0.8
+          area_m2: 0.0001
+          treat_as_gas: true
+        from_node_id: n1
+        to_node_id: n2
+    boundaries:
+      - node_id: n1
+        pressure_pa: 200000.0
+        temperature_k: 300.0
+      - node_id: n2
+        pressure_pa: 101325.0
+        temperature_k: 300.0
+    schedules: []
+modules: []
+layouts:
+  - system_id: s1
+    nodes:
+      - node_id: n1
+        x: 200.0
+        y: 200.0
+      - node_id: n2
+        x: 450.0
+        y: 200.0
+    edges: []
+    overlay:
+      show_pressure: true
+      show_temperature: false
+      show_enthalpy: false
+      show_density: false
+      show_mass_flow: true
+runs:
+  runs: []

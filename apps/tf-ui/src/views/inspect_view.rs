@@ -1,0 +1,806 @@
+use tf_project::schema::{
+    BoundaryDef, ComponentDef, ComponentKind, NodeDef, NodeKind, OverlaySettingsDef, Project,
+};
+
+use crate::views::pid_view::PidView;
+
+#[derive(Default)]
+pub struct InspectView {
+    overlay: OverlaySettingsDef,
+    new_node_kind: NodeKindChoice,
+    new_component_kind: ComponentKindChoice,
+    new_component_from: Option<String>,
+    new_component_to: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum NodeKindChoice {
+    #[default]
+    Junction,
+    ControlVolume,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ComponentKindChoice {
+    #[default]
+    Orifice,
+    Valve,
+    Pipe,
+    Pump,
+    Turbine,
+}
+
+#[derive(Default)]
+pub struct InspectActions {
+    pub add_node: Option<NodeKindChoice>,
+    pub delete_node_id: Option<String>,
+    pub add_component: Option<NewComponentSpec>,
+    pub delete_component_id: Option<String>,
+    pub needs_recompile: bool,
+}
+
+pub struct NewComponentSpec {
+    pub kind: ComponentKindChoice,
+    pub from_node_id: String,
+    pub to_node_id: String,
+}
+
+impl InspectView {
+    pub fn overlay_settings(&self) -> &OverlaySettingsDef {
+        &self.overlay
+    }
+
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        project: &mut Option<Project>,
+        selected_system_id: &Option<String>,
+        selected_node_id: &Option<String>,
+        selected_component_id: &Option<String>,
+        pid_view: &mut PidView,
+    ) -> InspectActions {
+        let mut actions = InspectActions::default();
+
+        ui.heading("Inspector");
+
+        if project.is_none() {
+            ui.label("No project loaded");
+            return actions;
+        }
+
+        if selected_system_id.is_none() {
+            ui.label("No system selected");
+            return actions;
+        }
+
+        let proj = project.as_mut().unwrap();
+        let sys_id = selected_system_id.as_ref().unwrap();
+
+        if let Some(system) = proj.systems.iter_mut().find(|s| &s.id == sys_id) {
+            let node_ids: Vec<String> = system.nodes.iter().map(|n| n.id.clone()).collect();
+
+            // First show selection details
+            ui.separator();
+            ui.heading("Selection");
+            if let Some(node_id) = selected_node_id {
+                if let Some(node) = system.nodes.iter_mut().find(|n| &n.id == node_id) {
+                    actions.needs_recompile |=
+                        self.show_node_inspector(ui, node, &mut system.boundaries, pid_view);
+                    ui.separator();
+                    if ui.button("Delete Node").clicked() {
+                        actions.delete_node_id = Some(node_id.clone());
+                    }
+                }
+            } else if let Some(comp_id) = selected_component_id {
+                if let Some(component) = system.components.iter_mut().find(|c| &c.id == comp_id) {
+                    actions.needs_recompile |= self.show_component_inspector(ui, component);
+                    ui.separator();
+                    if ui.button("Delete Component").clicked() {
+                        actions.delete_component_id = Some(comp_id.clone());
+                    }
+                }
+            } else {
+                ui.label("No selection - click a node or component");
+            }
+
+            // Add node section
+            ui.separator();
+            ui.heading("Add Node");
+            ui.horizontal(|ui| {
+                ui.label("Type:");
+                egui::ComboBox::from_id_salt("new_node_kind")
+                    .selected_text(self.new_node_kind.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.new_node_kind,
+                            NodeKindChoice::Junction,
+                            "Junction",
+                        );
+                        ui.selectable_value(
+                            &mut self.new_node_kind,
+                            NodeKindChoice::ControlVolume,
+                            "Control Volume",
+                        );
+                    });
+            });
+            if ui.button("+ Add New Node").clicked() {
+                actions.add_node = Some(self.new_node_kind);
+            }
+
+            // Add component section
+            ui.separator();
+            ui.heading("Add Component");
+            if node_ids.len() < 2 {
+                ui.label("Add at least two nodes to create components");
+            } else {
+                if self
+                    .new_component_from
+                    .as_ref()
+                    .map(|id| !node_ids.contains(id))
+                    .unwrap_or(true)
+                {
+                    self.new_component_from = node_ids.first().cloned();
+                }
+
+                if self
+                    .new_component_to
+                    .as_ref()
+                    .map(|id| !node_ids.contains(id))
+                    .unwrap_or(true)
+                {
+                    self.new_component_to = node_ids.get(1).cloned();
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label("Kind:");
+                    egui::ComboBox::from_id_salt("new_component_kind")
+                        .selected_text(self.new_component_kind.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.new_component_kind,
+                                ComponentKindChoice::Orifice,
+                                "Orifice",
+                            );
+                            ui.selectable_value(
+                                &mut self.new_component_kind,
+                                ComponentKindChoice::Valve,
+                                "Valve",
+                            );
+                            ui.selectable_value(
+                                &mut self.new_component_kind,
+                                ComponentKindChoice::Pipe,
+                                "Pipe",
+                            );
+                            ui.selectable_value(
+                                &mut self.new_component_kind,
+                                ComponentKindChoice::Pump,
+                                "Pump",
+                            );
+                            ui.selectable_value(
+                                &mut self.new_component_kind,
+                                ComponentKindChoice::Turbine,
+                                "Turbine",
+                            );
+                        });
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("From:");
+                    egui::ComboBox::from_id_salt("new_component_from")
+                        .selected_text(
+                            self.new_component_from
+                                .clone()
+                                .unwrap_or_else(|| "Select".to_string()),
+                        )
+                        .show_ui(ui, |ui| {
+                            for node_id in &node_ids {
+                                ui.selectable_value(
+                                    &mut self.new_component_from,
+                                    Some(node_id.clone()),
+                                    node_id,
+                                );
+                            }
+                        });
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("To:");
+                    egui::ComboBox::from_id_salt("new_component_to")
+                        .selected_text(
+                            self.new_component_to
+                                .clone()
+                                .unwrap_or_else(|| "Select".to_string()),
+                        )
+                        .show_ui(ui, |ui| {
+                            for node_id in &node_ids {
+                                ui.selectable_value(
+                                    &mut self.new_component_to,
+                                    Some(node_id.clone()),
+                                    node_id,
+                                );
+                            }
+                        });
+                });
+
+                let can_add = self.new_component_from.is_some()
+                    && self.new_component_to.is_some()
+                    && self.new_component_from != self.new_component_to;
+
+                if ui
+                    .add_enabled(can_add, egui::Button::new("+ Add New Component"))
+                    .clicked()
+                {
+                    if let (Some(from_id), Some(to_id)) = (
+                        self.new_component_from.clone(),
+                        self.new_component_to.clone(),
+                    ) {
+                        actions.add_component = Some(NewComponentSpec {
+                            kind: self.new_component_kind,
+                            from_node_id: from_id,
+                            to_node_id: to_id,
+                        });
+                    }
+                }
+            }
+        }
+
+        ui.separator();
+        ui.heading("Overlay Settings");
+        ui.checkbox(&mut self.overlay.show_pressure, "Show Pressure");
+        ui.checkbox(&mut self.overlay.show_temperature, "Show Temperature");
+        ui.checkbox(&mut self.overlay.show_enthalpy, "Show Enthalpy");
+        ui.checkbox(&mut self.overlay.show_density, "Show Density");
+        ui.checkbox(&mut self.overlay.show_mass_flow, "Show Mass Flow");
+
+        actions
+    }
+
+    fn show_node_inspector(
+        &mut self,
+        ui: &mut egui::Ui,
+        node: &mut NodeDef,
+        boundaries: &mut Vec<BoundaryDef>,
+        pid_view: &mut PidView,
+    ) -> bool {
+        ui.strong("Node");
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            ui.label("ID:");
+            ui.label(&node.id);
+        });
+
+        let mut changed = false;
+        changed |= ui
+            .horizontal(|ui| {
+                ui.label("Name:");
+                ui.text_edit_singleline(&mut node.name)
+            })
+            .inner
+            .changed();
+
+        changed |= ui
+            .horizontal(|ui| {
+                ui.label("Kind:");
+                let mut kind_choice = match node.kind {
+                    NodeKind::Junction => NodeKindChoice::Junction,
+                    NodeKind::ControlVolume { .. } => NodeKindChoice::ControlVolume,
+                };
+
+                let old_choice = kind_choice;
+                egui::ComboBox::from_id_salt("node_kind")
+                    .selected_text(kind_choice.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut kind_choice, NodeKindChoice::Junction, "Junction");
+                        ui.selectable_value(
+                            &mut kind_choice,
+                            NodeKindChoice::ControlVolume,
+                            "Control Volume",
+                        );
+                    });
+
+                if kind_choice != old_choice {
+                    node.kind = match kind_choice {
+                        NodeKindChoice::Junction => NodeKind::Junction,
+                        NodeKindChoice::ControlVolume => NodeKind::ControlVolume {
+                            volume_m3: 0.05,
+                            initial: Default::default(),
+                        },
+                    };
+                    true
+                } else {
+                    false
+                }
+            })
+            .inner;
+
+        if let NodeKind::ControlVolume { volume_m3, initial } = &mut node.kind {
+            changed |= ui
+                .horizontal(|ui| {
+                    ui.label("Volume (m3):");
+                    ui.add(
+                        egui::DragValue::new(volume_m3)
+                            .speed(0.01)
+                            .range(1e-6..=1e3),
+                    )
+                })
+                .inner
+                .changed();
+
+            changed |=
+                edit_optional_value(ui, "Initial P (Pa)", &mut initial.p_pa, 1000.0, 1.0..=1e9);
+            changed |=
+                edit_optional_value(ui, "Initial T (K)", &mut initial.t_k, 1.0, 1.0..=2000.0);
+            changed |= edit_optional_value(
+                ui,
+                "Initial h (J/kg)",
+                &mut initial.h_j_per_kg,
+                1000.0,
+                -1e7..=1e7,
+            );
+            changed |= edit_optional_value(ui, "Initial m (kg)", &mut initial.m_kg, 0.1, 0.0..=1e6);
+        }
+
+        ui.separator();
+        ui.strong("Boundary Condition");
+
+        let bc_idx = boundaries.iter().position(|bc| bc.node_id == node.id);
+
+        if let Some(idx) = bc_idx {
+            let bc = &mut boundaries[idx];
+
+            changed |= ui
+                .horizontal(|ui| {
+                    ui.label("Type:");
+                    let current_type =
+                        match (bc.pressure_pa, bc.temperature_k, bc.enthalpy_j_per_kg) {
+                            (Some(_), Some(_), _) => "P-T",
+                            (Some(_), None, Some(_)) => "P-H",
+                            _ => "Invalid",
+                        };
+
+                    egui::ComboBox::from_id_salt("bc_type")
+                        .selected_text(current_type)
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(current_type == "P-T", "P-T").clicked() {
+                                bc.pressure_pa = Some(101325.0);
+                                bc.temperature_k = Some(300.0);
+                                bc.enthalpy_j_per_kg = None;
+                                return true;
+                            }
+                            if ui.selectable_label(current_type == "P-H", "P-H").clicked() {
+                                bc.pressure_pa = Some(101325.0);
+                                bc.temperature_k = None;
+                                bc.enthalpy_j_per_kg = Some(300000.0);
+                                return true;
+                            }
+                            false
+                        })
+                        .inner
+                        .unwrap_or(false)
+                })
+                .inner;
+
+            changed |= if let Some(ref mut p) = bc.pressure_pa {
+                ui.horizontal(|ui| {
+                    ui.label("Pressure (Pa):");
+                    ui.add(egui::DragValue::new(p).speed(1000.0).range(0.0..=1e9))
+                })
+                .inner
+                .changed()
+            } else {
+                false
+            };
+
+            changed |= if let Some(ref mut t) = bc.temperature_k {
+                ui.horizontal(|ui| {
+                    ui.label("Temperature (K):");
+                    ui.add(egui::DragValue::new(t).speed(1.0).range(0.0..=1000.0))
+                })
+                .inner
+                .changed()
+            } else {
+                false
+            };
+
+            changed |= if let Some(ref mut h) = bc.enthalpy_j_per_kg {
+                ui.horizontal(|ui| {
+                    ui.label("Enthalpy (J/kg):");
+                    ui.add(egui::DragValue::new(h).speed(1000.0).range(-1e7..=1e7))
+                })
+                .inner
+                .changed()
+            } else {
+                false
+            };
+
+            if ui.button("Remove Boundary Condition").clicked() {
+                boundaries.remove(idx);
+                changed = true;
+            }
+        } else {
+            ui.label("No boundary condition set");
+            if ui.button("Add Boundary Condition").clicked() {
+                boundaries.push(BoundaryDef {
+                    node_id: node.id.clone(),
+                    pressure_pa: Some(101325.0),
+                    temperature_k: Some(300.0),
+                    enthalpy_j_per_kg: None,
+                });
+                changed = true;
+            }
+        }
+
+        ui.separator();
+        ui.strong("Per-Node Overlay");
+
+        // Get current per-node overlay settings, or create default
+        let mut node_overlay = pid_view
+            .get_node_overlay(&node.id)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut overlay_changed = false;
+        overlay_changed |= ui
+            .checkbox(&mut node_overlay.show_pressure, "Show Pressure")
+            .changed();
+        overlay_changed |= ui
+            .checkbox(&mut node_overlay.show_temperature, "Show Temperature")
+            .changed();
+        overlay_changed |= ui
+            .checkbox(&mut node_overlay.show_enthalpy, "Show Enthalpy")
+            .changed();
+        overlay_changed |= ui
+            .checkbox(&mut node_overlay.show_density, "Show Density")
+            .changed();
+
+        if overlay_changed {
+            pid_view.set_node_overlay(node.id.clone(), node_overlay);
+        }
+
+        changed
+    }
+
+    fn show_component_inspector(
+        &mut self,
+        ui: &mut egui::Ui,
+        component: &mut ComponentDef,
+    ) -> bool {
+        ui.strong("Component");
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            ui.label("ID:");
+            ui.label(&component.id);
+        });
+
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.label("Name:");
+            changed |= ui.text_edit_singleline(&mut component.name).changed();
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Type:");
+            let type_name = match &component.kind {
+                ComponentKind::Orifice { .. } => "Orifice",
+                ComponentKind::Valve { .. } => "Valve",
+                ComponentKind::Pipe { .. } => "Pipe",
+                ComponentKind::Pump { .. } => "Pump",
+                ComponentKind::Turbine { .. } => "Turbine",
+            };
+            ui.label(type_name);
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("From:");
+            ui.label(&component.from_node_id);
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("To:");
+            ui.label(&component.to_node_id);
+        });
+
+        ui.separator();
+        ui.strong("Parameters");
+
+        match &mut component.kind {
+            ComponentKind::Orifice {
+                cd,
+                area_m2,
+                treat_as_gas,
+            } => {
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Cd:");
+                        ui.add(egui::DragValue::new(cd).speed(0.01).range(0.01..=1.0))
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Area (m²):");
+                        ui.add(
+                            egui::DragValue::new(area_m2)
+                                .speed(0.0001)
+                                .range(1e-6..=1.0),
+                        )
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui.checkbox(treat_as_gas, "Treat as Gas").changed();
+            }
+            ComponentKind::Valve {
+                cd,
+                area_max_m2,
+                position,
+                law,
+                treat_as_gas,
+            } => {
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Cd:");
+                        ui.add(egui::DragValue::new(cd).speed(0.01).range(0.01..=1.0))
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Max Area (m²):");
+                        ui.add(
+                            egui::DragValue::new(area_max_m2)
+                                .speed(0.0001)
+                                .range(1e-6..=1.0),
+                        )
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Position:");
+                        ui.add(egui::DragValue::new(position).speed(0.01).range(0.0..=1.0))
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Law:");
+                        egui::ComboBox::from_id_salt("valve_law")
+                            .selected_text(format!("{:?}", law))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    law,
+                                    tf_project::schema::ValveLawDef::Linear,
+                                    "Linear",
+                                )
+                                .changed()
+                                    || ui
+                                        .selectable_value(
+                                            law,
+                                            tf_project::schema::ValveLawDef::Quadratic,
+                                            "Quadratic",
+                                        )
+                                        .changed()
+                                    || ui
+                                        .selectable_value(
+                                            law,
+                                            tf_project::schema::ValveLawDef::QuickOpening,
+                                            "QuickOpening",
+                                        )
+                                        .changed()
+                            })
+                            .inner
+                            .unwrap_or(false)
+                    })
+                    .inner;
+
+                changed |= ui.checkbox(treat_as_gas, "Treat as Gas").changed();
+            }
+            ComponentKind::Pipe {
+                length_m,
+                diameter_m,
+                roughness_m,
+                k_minor,
+                mu_pa_s,
+            } => {
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Length (m):");
+                        ui.add(
+                            egui::DragValue::new(length_m)
+                                .speed(0.1)
+                                .range(0.001..=1000.0),
+                        )
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Diameter (m):");
+                        ui.add(
+                            egui::DragValue::new(diameter_m)
+                                .speed(0.001)
+                                .range(0.001..=10.0),
+                        )
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Roughness (m):");
+                        ui.add(
+                            egui::DragValue::new(roughness_m)
+                                .speed(0.00001)
+                                .range(0.0..=0.01),
+                        )
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("K Minor:");
+                        ui.add(egui::DragValue::new(k_minor).speed(0.1).range(0.0..=100.0))
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Viscosity (Pa·s):");
+                        ui.add(
+                            egui::DragValue::new(mu_pa_s)
+                                .speed(0.0001)
+                                .range(1e-6..=1.0),
+                        )
+                    })
+                    .inner
+                    .changed();
+            }
+            ComponentKind::Pump {
+                cd,
+                area_m2,
+                delta_p_pa,
+                eta,
+                treat_as_liquid,
+            } => {
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Cd:");
+                        ui.add(egui::DragValue::new(cd).speed(0.01).range(0.01..=1.0))
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Area (m²):");
+                        ui.add(
+                            egui::DragValue::new(area_m2)
+                                .speed(0.0001)
+                                .range(1e-6..=1.0),
+                        )
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("ΔP (Pa):");
+                        ui.add(
+                            egui::DragValue::new(delta_p_pa)
+                                .speed(1000.0)
+                                .range(0.0..=1e8),
+                        )
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Efficiency:");
+                        ui.add(egui::DragValue::new(eta).speed(0.01).range(0.01..=1.0))
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui.checkbox(treat_as_liquid, "Treat as Liquid").changed();
+            }
+            ComponentKind::Turbine {
+                cd,
+                area_m2,
+                eta,
+                treat_as_gas,
+            } => {
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Cd:");
+                        ui.add(egui::DragValue::new(cd).speed(0.01).range(0.01..=1.0))
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Area (m²):");
+                        ui.add(
+                            egui::DragValue::new(area_m2)
+                                .speed(0.0001)
+                                .range(1e-6..=1.0),
+                        )
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Efficiency:");
+                        ui.add(egui::DragValue::new(eta).speed(0.01).range(0.01..=1.0))
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui.checkbox(treat_as_gas, "Treat as Gas").changed();
+            }
+        }
+
+        changed
+    }
+}
+
+impl NodeKindChoice {
+    fn label(self) -> &'static str {
+        match self {
+            NodeKindChoice::Junction => "Junction",
+            NodeKindChoice::ControlVolume => "Control Volume",
+        }
+    }
+}
+
+impl ComponentKindChoice {
+    fn label(self) -> &'static str {
+        match self {
+            ComponentKindChoice::Orifice => "Orifice",
+            ComponentKindChoice::Valve => "Valve",
+            ComponentKindChoice::Pipe => "Pipe",
+            ComponentKindChoice::Pump => "Pump",
+            ComponentKindChoice::Turbine => "Turbine",
+        }
+    }
+}
+
+fn edit_optional_value(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut Option<f64>,
+    speed: f64,
+    range: std::ops::RangeInclusive<f64>,
+) -> bool {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        if let Some(v) = value {
+            let drag_changed = ui
+                .add(egui::DragValue::new(v).speed(speed).range(range.clone()))
+                .changed();
+            if ui.button("Clear").clicked() {
+                *value = None;
+                return true;
+            }
+            drag_changed
+        } else if ui.button("Set").clicked() {
+            *value = Some(*range.start());
+            true
+        } else {
+            false
+        }
+    })
+    .inner
+}

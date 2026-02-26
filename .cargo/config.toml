@@ -1,0 +1,11 @@
+[alias]
+t = "test"
+c = "clippy --all-targets --all-features -- -D warnings"
+f = "fmt --all"
+r = "run -p tf-cli"
+
+[profile.dev]
+opt-level = 1
+
+[profile.test]
+opt-level = 1
