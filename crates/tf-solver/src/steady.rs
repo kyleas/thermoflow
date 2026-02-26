@@ -24,7 +24,7 @@ pub struct SteadySolution {
 }
 
 /// Unpack solution vector [P_0, h_0, P_1, h_1, ...] for free nodes into full arrays.
-fn unpack_solution(
+pub(crate) fn unpack_solution(
     x: &DVector<f64>,
     problem: &SteadyProblem,
 ) -> SolverResult<(Vec<Pressure>, Vec<SpecEnthalpy>)> {
@@ -195,8 +195,10 @@ pub fn compute_residuals(
         }
 
         if is_h_free {
-            // Energy balance residual
-            let re = energy_in[i] - enthalpies[i] * mass_out[i];
+            // Energy balance residual with regularization for numerical stability
+            // When mass_out is very small, add a small regularization term to avoid singular Jacobian
+            const MDOT_REG: f64 = 1e-3; // kg/s regularization (increased for stability)
+            let re = energy_in[i] - enthalpies[i] * (mass_out[i] + MDOT_REG);
             residuals[r_idx] = re;
             r_idx += 1;
         }
@@ -205,21 +207,77 @@ pub fn compute_residuals(
     Ok(residuals)
 }
 
-/// Initial guess for unknowns.
+/// Initial guess for unknowns with smart propagation from boundaries.
+///
+/// For free nodes (no BC), this function:
+/// 1. Finds nearby boundary/constrained nodes through the component graph  
+/// 2. Propagates their pressure/enthalpy values to initialize free nodes
+/// 3. Improves robustness at t=0 when some paths may be blocked
 pub fn initial_guess(problem: &SteadyProblem) -> SolverResult<DVector<f64>> {
     let node_count = problem.graph.nodes().len();
     let mut pressures = vec![Pressure::new::<uom::si::pressure::pascal>(101325.0); node_count];
     let mut enthalpies = vec![300000.0; node_count];
+    let mut pressure_set = vec![false; node_count];
+    let mut enthalpy_set = vec![false; node_count];
 
-    // Use boundary conditions where available
+    // Apply boundary conditions first
     for i in 0..node_count {
         if let Some(p) = problem.bc_pressure[i] {
             pressures[i] = p;
+            pressure_set[i] = true;
         }
         if let Some(h) = problem.bc_enthalpy[i] {
             enthalpies[i] = h;
+            enthalpy_set[i] = true;
+        }
+    }
+
+    // Propagate boundary conditions to free nodes through component connectivity
+    // Use breadth-first propagation from constrained nodes
+    let mut changed = true;
+    let max_iterations = 10; // Limit propagation iterations
+    let mut iteration = 0;
+
+    while changed && iteration < max_iterations {
+        changed = false;
+        iteration += 1;
+
+        // For each component, propagate values from set nodes to unset neighbors
+        for comp in problem.graph.components() {
+            if let (Some(inlet_node), Some(outlet_node)) = (
+                problem.graph.comp_inlet_node(comp.id),
+                problem.graph.comp_outlet_node(comp.id),
+            ) {
+                let inlet_idx = inlet_node.index() as usize;
+                let outlet_idx = outlet_node.index() as usize;
+
+                // Propagate pressure: use average if one side is set
+                if pressure_set[inlet_idx] && !pressure_set[outlet_idx] {
+                    pressures[outlet_idx] = pressures[inlet_idx]; // Maintain continuity
+                    pressure_set[outlet_idx] = true;
+                    changed = true;
+                }
+                if pressure_set[outlet_idx] && !pressure_set[inlet_idx] {
+                    pressures[inlet_idx] = pressures[outlet_idx]; // Maintain continuity
+                    pressure_set[inlet_idx] = true;
+                    changed = true;
+                }
+
+                // Propagate enthalpy: use upstream value (flow direction agnostic)
+                if enthalpy_set[inlet_idx] && !enthalpy_set[outlet_idx] {
+                    enthalpies[outlet_idx] = enthalpies[inlet_idx];
+                    enthalpy_set[outlet_idx] = true;
+                    changed = true;
+                }
+                if enthalpy_set[outlet_idx] && !enthalpy_set[inlet_idx] {
+                    enthalpies[inlet_idx] = enthalpies[outlet_idx];
+                    enthalpy_set[inlet_idx] = true;
+                    changed = true;
+                }
+            }
         }
     }
 
     Ok(pack_solution(&pressures, &enthalpies, problem))
 }
+

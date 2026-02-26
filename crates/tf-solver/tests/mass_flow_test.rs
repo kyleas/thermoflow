@@ -11,7 +11,7 @@ fn orifice_mass_flow_computed() {
     // Test that mimics the example 1 setup: orifice with specific BCs
     // Inlet: 200 kPa, 300 K
     // Outlet: 101.325 kPa, (same temp initially)
-    
+
     let mut builder = GraphBuilder::new();
     let n0 = builder.add_node("inlet");
     let n1 = builder.add_node("outlet");
@@ -39,21 +39,31 @@ fn orifice_mass_flow_computed() {
 
     // Solve
     let solution = solve(&mut problem, None, None).unwrap();
-    
-    println!("Orifice example converged in {} iterations", solution.iterations);
+
+    println!(
+        "Orifice example converged in {} iterations",
+        solution.iterations
+    );
     println!("Residual norm: {}", solution.residual_norm);
-    
+
     // Verify we got mass flows
     assert_eq!(solution.mass_flows.len(), 1);
     let (comp_id, mdot) = solution.mass_flows[0];
     assert_eq!(comp_id, c0);
-    
-    println!("Mass flow through orifice (example 1 conditions): {} kg/s", mdot);
-    
+
+    println!(
+        "Mass flow through orifice (example 1 conditions): {} kg/s",
+        mdot
+    );
+
     // Should be positive flow
     assert!(mdot > 0.0, "Mass flow should be positive");
-    
+
     // Based on orifice equation with nitrogen gas, the flow should be reasonable
     // Actual computed value is around 0.053 kg/s
-    assert!(mdot > 0.04 && mdot < 0.07, "Mass flow {} kg/s is outside expected range for example 1", mdot);
+    assert!(
+        mdot > 0.04 && mdot < 0.07,
+        "Mass flow {} kg/s is outside expected range for example 1",
+        mdot
+    );
 }

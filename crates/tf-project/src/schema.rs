@@ -192,6 +192,10 @@ pub struct NodeLayout {
     pub node_id: String,
     pub x: f32,
     pub y: f32,
+    #[serde(default)]
+    pub label_offset_x: f32,
+    #[serde(default)]
+    pub label_offset_y: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlay: Option<NodeOverlayDef>,
 }
@@ -211,8 +215,20 @@ pub struct NodeOverlayDef {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EdgeLayout {
     pub component_id: String,
+    #[serde(default)]
+    pub points: Vec<RoutePointDef>,
     pub label_offset_x: f32,
     pub label_offset_y: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_x: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_y: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RoutePointDef {
+    pub x: f32,
+    pub y: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

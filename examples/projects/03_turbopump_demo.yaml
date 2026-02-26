@@ -57,13 +57,35 @@ layouts:
       - node_id: n_supply
         x: 200.0
         y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
       - node_id: n_pump_out
         x: 380.0
         y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
       - node_id: n_exhaust
         x: 560.0
         y: 200.0
-    edges: []
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+    edges:
+      - component_id: p1
+        points:
+          - x: 200.0
+            y: 200.0
+          - x: 380.0
+            y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+      - component_id: t1
+        points:
+          - x: 380.0
+            y: 200.0
+          - x: 560.0
+            y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
     overlay:
       show_pressure: true
       show_temperature: false

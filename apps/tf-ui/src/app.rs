@@ -94,7 +94,7 @@ impl ThermoflowApp {
             // For unsaved projects, use temp directory
             std::env::temp_dir().join("thermoflow-runs")
         };
-        
+
         if let Ok(store) = RunStore::new(runs_dir) {
             self.run_store = Some(store);
         }
@@ -225,22 +225,25 @@ impl ThermoflowApp {
         if self.run_worker.is_some() {
             return;
         }
-        let (system, system_id) = match (&self.project, &self.selected_system_id) {
-            (Some(proj), Some(id)) => {
-                let system = proj.systems.iter().find(|s| s.id == *id);
-                match system {
-                    Some(s) => (s.clone(), id.clone()),
-                    None => return,
-                }
+
+        // Get project path and system ID
+        let project_path = match &self.project_path {
+            Some(path) => path,
+            None => {
+                self.last_worker_message = Some("No project file loaded".to_string());
+                return;
             }
-            _ => return,
-        };
-        let store = match self.run_store.clone() {
-            Some(store) => store,
-            None => return,
         };
 
-        let worker = RunWorker::start(run_type, system, system_id, store, self.use_cached);
+        let system_id = match &self.selected_system_id {
+            Some(id) => id,
+            None => {
+                self.last_worker_message = Some("No system selected".to_string());
+                return;
+            }
+        };
+
+        let worker = RunWorker::start(run_type, project_path, system_id, self.use_cached);
         self.run_worker = Some(worker);
     }
 
@@ -305,6 +308,8 @@ impl ThermoflowApp {
             node_id: node_id.clone(),
             x,
             y,
+            label_offset_x: 0.0,
+            label_offset_y: 0.0,
             overlay: None,
         });
 
@@ -360,9 +365,30 @@ impl ThermoflowApp {
             id: component_id.clone(),
             name,
             kind,
-            from_node_id: spec.from_node_id,
-            to_node_id: spec.to_node_id,
+            from_node_id: spec.from_node_id.clone(),
+            to_node_id: spec.to_node_id.clone(),
         });
+
+        let layout = Self::layout_for_system(project, system_id);
+        let mut pid_layout = crate::pid_editor::PidLayout::from_layout_def(layout);
+        if let (Some(from), Some(to)) = (
+            pid_layout.nodes.get(&spec.from_node_id).map(|n| n.pos),
+            pid_layout.nodes.get(&spec.to_node_id).map(|n| n.pos),
+        ) {
+            let points =
+                crate::pid_editor::normalize_orthogonal(&crate::pid_editor::autoroute(from, to));
+            let component_pos = crate::pid_editor::routing::polyline_midpoint(&points);
+            pid_layout.edges.insert(
+                component_id.clone(),
+                crate::pid_editor::PidEdgeRoute {
+                    component_id: component_id.clone(),
+                    points,
+                    label_offset: egui::Vec2::ZERO,
+                    component_pos: Some(component_pos),
+                },
+            );
+        }
+        pid_layout.apply_to_layout_def(layout);
 
         Some(component_id)
     }

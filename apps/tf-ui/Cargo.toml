@@ -25,5 +25,6 @@ tf-solver = { workspace = true }
 tf-sim = { workspace = true }
 tf-project = { workspace = true }
 tf-results = { workspace = true }
+tf-app = { path = "../../crates/tf-app" }
 
 [dev-dependencies]

@@ -32,7 +32,7 @@ systems:
           type: Valve
           cd: 0.8
           area_max_m2: 0.0002
-          position: 1.0
+          position: 0.0
           law:
             type: Linear
           treat_as_gas: true
@@ -67,13 +67,35 @@ layouts:
       - node_id: n_tank
         x: 200.0
         y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
       - node_id: n_valve
         x: 380.0
         y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
       - node_id: n_ambient
         x: 560.0
         y: 200.0
-    edges: []
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+    edges:
+      - component_id: v1
+        points:
+          - x: 200.0
+            y: 200.0
+          - x: 380.0
+            y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+      - component_id: o1
+        points:
+          - x: 380.0
+            y: 200.0
+          - x: 560.0
+            y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
     overlay:
       show_pressure: true
       show_temperature: true

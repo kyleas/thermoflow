@@ -14,5 +14,5 @@ pub mod steady;
 pub use error::{SolverError, SolverResult};
 pub use newton::{NewtonConfig, NewtonResult};
 pub use problem::SteadyProblem;
-pub use solve::solve;
+pub use solve::{solve, solve_with_active};
 pub use steady::SteadySolution;

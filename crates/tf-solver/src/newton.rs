@@ -22,12 +22,12 @@ pub struct NewtonConfig {
 impl Default for NewtonConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 50,
+            max_iterations: 200, // Increased for robust startup with closed/nearly-closed valves
             abs_tol: 1e-6,
             rel_tol: 1e-6,
             min_pressure: 1.0,
             line_search_beta: 0.5,
-            max_line_search_iters: 20,
+            max_line_search_iters: 25, // Slightly increased line search iterations
         }
     }
 }
@@ -74,13 +74,26 @@ where
         // Compute Jacobian
         let jac = jacobian_fn(&x)?;
 
-        // Solve J * dx = -r
-        let dx = jac
-            .lu()
-            .solve(&(-r.clone()))
-            .ok_or_else(|| SolverError::Numeric {
-                what: "Jacobian solve failed".to_string(),
-            })?;
+        // Solve J * dx = -r with robust fallback for singular/ill-conditioned matrices
+        let dx = {
+            // Try standard LU decomposition first (fastest for well-conditioned systems)
+            match jac.clone().lu().solve(&(-r.clone())) {
+                Some(solution) => solution,
+                None => {
+                    // LU failed, Jacobian is singular or near-singular
+                    // Use SVD-based pseudo-inverse with regularization
+                    // This handles underdetermined and rank-deficient systems
+                    let svd = jac.svd(true, true);
+                    let threshold = 1e-10 * svd.singular_values.max(); // Relative threshold for singular values
+                    
+                    // Compute regularized pseudo-inverse
+                    svd.solve(&(-r.clone()), threshold)
+                        .map_err(|_| SolverError::Numeric {
+                            what: "Jacobian is severely ill-conditioned; SVD pseudo-inverse failed".to_string(),
+                        })?
+                }
+            }
+        };
 
         // Line search with positivity constraints
         let mut alpha = 1.0;

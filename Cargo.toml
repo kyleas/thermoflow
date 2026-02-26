@@ -9,6 +9,7 @@ members = [
   "crates/tf-sim",
   "crates/tf-project",
   "crates/tf-results",
+  "crates/tf-app",
   "apps/tf-cli",
   "apps/tf-ui",
 ]

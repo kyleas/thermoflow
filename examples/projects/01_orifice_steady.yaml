@@ -41,10 +41,22 @@ layouts:
       - node_id: n1
         x: 200.0
         y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
       - node_id: n2
         x: 450.0
         y: 200.0
-    edges: []
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+    edges:
+      - component_id: c1
+        points:
+          - x: 200.0
+            y: 200.0
+          - x: 450.0
+            y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
     overlay:
       show_pressure: true
       show_temperature: false

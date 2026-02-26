@@ -64,14 +64,24 @@ impl Valve {
     }
 
     /// Compute effective area based on position and law.
+    ///
+    /// Includes minimum conductance regularization to prevent singular Jacobians
+    /// in solvers when the valve is fully closed: uses a tiny leakage area (~1e-4 * area_max)
+    /// that represents physically negligible but numerically stable microscopic gaps.
     fn effective_area(&self) -> Area {
+        // Minimum conductance floor: 1e-4 of nominal area (microscopic leakage for stability)
+        let min_area_factor = 1e-4;
+
         let factor = match self.law {
             ValveLaw::Linear => self.position,
             ValveLaw::Quadratic => self.position * self.position,
         };
 
+        // Ensure even fully closed valve has minimal but finite conductance
+        let effective_factor = factor.max(min_area_factor);
+
         use uom::si::area::square_meter;
-        Area::new::<square_meter>(self.area_max.value * factor)
+        Area::new::<square_meter>(self.area_max.value * effective_factor)
     }
 }
 
@@ -112,7 +122,10 @@ mod tests {
     use uom::si::area::square_meter;
 
     #[test]
-    fn valve_closed_zero_flow() {
+    fn valve_closed_minimal_flow() {
+        // Minimum conductance regularization ensures that even fully closed valves
+        // have a small but finite flow to prevent singular Jacobians in solvers.
+        // This represents physically negligible microscopic leakage.
         let model = CoolPropModel::new();
         let comp = Composition::pure(Species::N2);
 
@@ -144,9 +157,15 @@ mod tests {
         };
 
         let mdot = valve.mdot(&model, ports).unwrap();
+        // With 1e-4 minimum conductance floor, even closed valve has finite flow
+        // magnitude should be negligible (< 1e-3) but > 1e-15 (not exact zero)
         assert!(
-            mdot.value.abs() < 1e-9,
-            "Closed valve should have ~zero flow"
+            mdot.value.abs() < 1e-3,
+            "Closed valve should have minimal flow (regularization floor ~ 1e-4 * area_max)"
+        );
+        assert!(
+            mdot.value.abs() > 1e-15,
+            "Closed valve should not be exactly zero (minimum conductance regularization)"
         );
     }
 

@@ -10,6 +10,8 @@ tf-core = { path = "../../crates/tf-core", features = ["serde"] }
 tf-graph = { path = "../../crates/tf-graph" }
 tf-components = { path = "../../crates/tf-components" }
 tf-solver = { path = "../../crates/tf-solver" }
+tf-app = { path = "../../crates/tf-app" }
+clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde_yaml.workspace = true
 tracing.workspace = true

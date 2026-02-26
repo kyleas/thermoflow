@@ -2,6 +2,7 @@
 #![allow(clippy::collapsible_if)]
 
 mod app;
+mod pid_editor;
 mod project_io;
 mod run_worker;
 mod transient_model;

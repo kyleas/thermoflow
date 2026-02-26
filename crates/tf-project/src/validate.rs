@@ -57,6 +57,28 @@ pub fn validate_project(project: &Project) -> Result<(), ValidationError> {
                 context: "layout system_id".to_string(),
             });
         }
+
+        if let Some(system) = project.systems.iter().find(|s| s.id == layout.system_id) {
+            let node_ids: HashSet<&String> = system.nodes.iter().map(|n| &n.id).collect();
+            for node in &layout.nodes {
+                if !node_ids.contains(&node.node_id) {
+                    return Err(ValidationError::MissingReference {
+                        id: node.node_id.clone(),
+                        context: "layout node_id".to_string(),
+                    });
+                }
+            }
+
+            let component_ids: HashSet<&String> = system.components.iter().map(|c| &c.id).collect();
+            for edge in &layout.edges {
+                if !component_ids.contains(&edge.component_id) {
+                    return Err(ValidationError::MissingReference {
+                        id: edge.component_id.clone(),
+                        context: "layout component_id".to_string(),
+                    });
+                }
+            }
+        }
     }
 
     Ok(())
