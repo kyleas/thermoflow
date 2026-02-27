@@ -1,7 +1,7 @@
 //! Project loading, saving, validation, and introspection.
 
 use std::path::Path;
-use tf_project::schema::{Project, SystemDef};
+use tf_project::schema::{NodeKind, Project, SystemDef};
 
 use crate::error::{AppError, AppResult};
 
@@ -17,50 +17,17 @@ pub struct SystemSummary {
 
 /// Load project from a YAML file.
 pub fn load_project(path: &Path) -> AppResult<Project> {
-    let content = std::fs::read_to_string(path).map_err(|e| AppError::ProjectFileRead {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-
-    let project: Project = serde_yaml::from_str(&content)
-        .map_err(|e| AppError::Project(format!("Failed to parse project YAML: {}", e)))?;
-
-    Ok(project)
+    tf_project::load_yaml(path).map_err(AppError::from)
 }
 
 /// Save project to a YAML file.
 pub fn save_project(path: &Path, project: &Project) -> AppResult<()> {
-    let content = serde_yaml::to_string(project)
-        .map_err(|e| AppError::Project(format!("Failed to serialize project: {}", e)))?;
-
-    std::fs::write(path, content).map_err(|e| AppError::ProjectFileWrite {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-
-    Ok(())
+    tf_project::save_yaml(path, project).map_err(AppError::from)
 }
 
 /// Validate project structure.
 pub fn validate_project(project: &Project) -> AppResult<()> {
-    // Basic validation: ensure at least one system exists
-    if project.systems.is_empty() {
-        return Err(AppError::Validation(
-            "Project must have at least one system".to_string(),
-        ));
-    }
-
-    // Validate each system has nodes and valid topology
-    for system in &project.systems {
-        if system.nodes.is_empty() {
-            return Err(AppError::Validation(format!(
-                "System '{}' must have at least one node",
-                system.id
-            )));
-        }
-    }
-
-    Ok(())
+    tf_project::validate_project(project).map_err(|e| AppError::Validation(e.to_string()))
 }
 
 /// List all systems in the project with summaries.
@@ -73,7 +40,11 @@ pub fn list_systems(project: &Project) -> Vec<SystemSummary> {
             name: system.name.clone(),
             node_count: system.nodes.len(),
             component_count: system.components.len(),
-            has_boundaries: !system.boundaries.is_empty(),
+            has_boundaries: !system.boundaries.is_empty()
+                || system
+                    .nodes
+                    .iter()
+                    .any(|node| matches!(node.kind, NodeKind::Atmosphere { .. })),
         })
         .collect()
 }

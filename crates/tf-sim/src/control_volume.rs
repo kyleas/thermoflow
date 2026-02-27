@@ -59,161 +59,170 @@ impl ControlVolume {
         h: SpecEnthalpy,
         p_hint: Option<Pressure>,
     ) -> SimResult<Pressure> {
-        const P_MIN: f64 = 1e2;
-        const P_MAX_INITIAL: f64 = 1e8;
-        const MAX_ITER: usize = 100;
+        use tf_core::timing::Timer;
+
+        let _timer = Timer::start("cv_pressure_inversion");
+
+        const P_MIN: f64 = 1e3; // 1 kPa minimum
+        const P_MAX_INITIAL: f64 = 1e8; //100 MPa maximum
+        const MAX_ITER: usize = 50;
         const TOL: f64 = 1e-2; // kg/m³
 
-        let (mut p_low, mut p_high) = if let Some(hint) = p_hint {
-            // Start bracketing around hint
-            let p_hint_val = hint.value;
-            let p_lo = (0.5 * p_hint_val).max(P_MIN);
-            let p_hi = (2.0 * p_hint_val).min(P_MAX_INITIAL);
-            (p_lo, p_hi)
-        } else {
-            (P_MIN, P_MAX_INITIAL)
-        };
-
-        // Try to find a valid bracket by testing initial bounds
-        let state_low_test = match fluid.state(
-            StateInput::PH {
-                p: Pressure::new::<uom::si::pressure::pascal>(p_low),
-                h,
-            },
-            self.composition.clone(),
-        ) {
-            Ok(s) => s,
-            Err(_) => {
-                // p_low might be too low for this enthalpy
-                p_low = 1e3;
-                fluid
-                    .state(
-                        StateInput::PH {
-                            p: Pressure::new::<uom::si::pressure::pascal>(p_low),
-                            h,
-                        },
-                        self.composition.clone(),
-                    )
-                    .map_err(|e| SimError::Backend {
-                        message: format!(
-                            "Cannot evaluate state at minimum feasible pressure: {}",
-                            e
-                        ),
-                    })?
-            }
-        };
-
-        let rho_low = fluid.rho(&state_low_test).map_err(|e| SimError::Backend {
-            message: format!("Failed to compute rho at P_low: {}", e),
-        })?;
-
-        // Try to find a valid upper bound
-        let mut p_high_valid = p_high;
-        for _ in 0..10 {
-            match fluid.state(
+        // Helper to safely evaluate state and density
+        let try_rho = |p_val: f64| -> Option<f64> {
+            let state_result = fluid.state(
                 StateInput::PH {
-                    p: Pressure::new::<uom::si::pressure::pascal>(p_high_valid),
+                    p: Pressure::new::<uom::si::pressure::pascal>(p_val),
                     h,
                 },
                 self.composition.clone(),
-            ) {
-                Ok(_) => break,
-                Err(_) => {
-                    // Pressure too high for this enthalpy, reduce it
-                    p_high_valid *= 0.5;
+            );
+
+            match state_result {
+                Ok(state) => fluid.rho(&state).ok().map(|r| r.value),
+                Err(_) => None,
+            }
+        };
+
+        // Initialize bracket based on hint or default range
+        let (mut p_low, mut p_high) = if let Some(hint) = p_hint {
+            let p_hint_val = hint.value;
+            // Start with tight bracket around hint
+            let p_lo = (0.2 * p_hint_val).max(P_MIN);
+            let p_hi = (5.0 * p_hint_val).min(P_MAX_INITIAL);
+            (p_lo, p_hi)
+        } else {
+            // Wide bracket for first solve
+            (P_MIN, P_MAX_INITIAL)
+        };
+
+        // Find valid lower bound
+        let mut rho_low = None;
+        for _attempt in 0..15 {
+            if let Some(rho) = try_rho(p_low) {
+                rho_low = Some(rho);
+                break;
+            }
+            // Increase lower bound if invalid
+            p_low *= 2.0;
+            if p_low >= P_MAX_INITIAL * 0.5 {
+                break;
+            }
+        }
+
+        let rho_low = rho_low.ok_or_else(|| SimError::Backend {
+            message: format!(
+                "Cannot find valid lower pressure bound for h={:.1} J/kg (tried P={:.0} to {:.0} Pa)",
+                h, P_MIN, p_low
+            ),
+        })?;
+
+        // Find valid upper bound
+        let mut rho_high = None;
+        for _attempt in 0..15 {
+            if let Some(rho) = try_rho(p_high) {
+                rho_high = Some(rho);
+                break;
+            }
+            // Decrease upper bound if invalid
+            p_high *= 0.5;
+            if p_high <= p_low * 2.0 {
+                break;
+            }
+        }
+
+        let rho_high = rho_high.ok_or_else(|| SimError::Backend {
+            message: format!(
+                "Cannot find valid upper pressure bound for h={:.1} J/kg (tried P={:.0} to {:.0} Pa)",
+                h, p_high, P_MAX_INITIAL
+            ),
+        })?;
+
+        // Check if target is bracketed
+        let f_low = rho_low - rho_target;
+        let f_high = rho_high - rho_target;
+
+        if f_low * f_high > 0.0 {
+            // Not bracketed - try to expand bounds intelligently
+            if f_low > 0.0 && f_high > 0.0 {
+                // Both too dense - need lower pressure
+                p_low = (p_low * 0.1).max(P_MIN);
+                // Retry with new lower bound
+                if let Some(new_rho_low) = try_rho(p_low) {
+                    if (new_rho_low - rho_target) * f_high < 0.0 {
+                        // Now bracketed
+                    } else {
+                        return Err(SimError::ConvergenceFailed {
+                            what: "pressure_from_rho_h: cannot bracket (all densities too high)",
+                        });
+                    }
+                }
+            } else {
+                // Both too sparse - need higher pressure
+                let p_high_new = (p_high * 5.0).min(P_MAX_INITIAL);
+                if let Some(new_rho_high) = try_rho(p_high_new) {
+                    p_high = p_high_new;
+                    if (f_low) * (new_rho_high - rho_target) < 0.0 {
+                        // Now bracketed
+                    } else {
+                        return Err(SimError::ConvergenceFailed {
+                            what: "pressure_from_rho_h: cannot bracket (all densities too low)",
+                        });
+                    }
+                } else {
+                    return Err(SimError::ConvergenceFailed {
+                        what: "pressure_from_rho_h: cannot bracket (pressure range exhausted)",
+                    });
                 }
             }
         }
 
-        let state_high = fluid
-            .state(
-                StateInput::PH {
-                    p: Pressure::new::<uom::si::pressure::pascal>(p_high_valid),
-                    h,
-                },
-                self.composition.clone(),
-            )
-            .map_err(|e| SimError::Backend {
-                message: format!("Failed to find valid upper pressure bound: {}", e),
-            })?;
+        // Bisection with cached rho values to minimize fluid calls
+        let mut rho_low_cached = rho_low;
+        let mut rho_high_cached = rho_high;
 
-        let rho_high = fluid.rho(&state_high).map_err(|e| SimError::Backend {
-            message: format!("Failed to compute rho at P_high: {}", e),
-        })?;
-
-        // Check if bracketed
-        if (rho_low.value - rho_target) * (rho_high.value - rho_target) > 0.0 {
-            // Not bracketed; expand if needed
-            if rho_low.value > rho_target {
-                // Both too high, try lower pressure
-                p_low *= 0.1;
-            } else if rho_high.value < rho_target {
-                // Both too low, try higher pressure (up to the valid limit)
-                p_high_valid = (p_high_valid * 10.0).min(1e8);
-            } else {
-                // Shouldn't happen
-                return Err(SimError::ConvergenceFailed {
-                    what: "pressure_from_rho_h: could not bracket root",
-                });
-            }
-        }
-
-        p_low = p_low.max(1e2);
-        p_high = p_high_valid;
-
-        // Bisection
-        for _ in 0..MAX_ITER {
+        for _iter in 0..MAX_ITER {
             let p_mid = 0.5 * (p_low + p_high);
 
-            let state_mid = match fluid.state(
-                StateInput::PH {
-                    p: Pressure::new::<uom::si::pressure::pascal>(p_mid),
-                    h,
-                },
-                self.composition.clone(),
-            ) {
-                Ok(s) => s,
-                Err(_) => {
-                    // Invalid state at p_mid, reduce upper bound
+            let rho_mid = match try_rho(p_mid) {
+                Some(r) => r,
+                None => {
+                    // Mid point invalid, shrink toward valid side
                     p_high = p_mid;
+                    rho_high_cached = try_rho(p_high).unwrap_or(rho_high_cached);
                     continue;
                 }
             };
 
-            let rho_mid = fluid.rho(&state_mid).map_err(|e| SimError::Backend {
-                message: format!("Failed to compute rho: {}", e),
-            })?;
-
-            let residual = (rho_mid.value - rho_target).abs();
+            let residual = (rho_mid - rho_target).abs();
             if residual < TOL {
                 return Ok(Pressure::new::<uom::si::pressure::pascal>(p_mid));
             }
 
-            let state_low = fluid
-                .state(
-                    StateInput::PH {
-                        p: Pressure::new::<uom::si::pressure::pascal>(p_low),
-                        h,
-                    },
-                    self.composition.clone(),
-                )
-                .map_err(|e| SimError::Backend {
-                    message: format!("Failed to evaluate state: {}", e),
-                })?;
+            // Update bracket
+            let f_mid = rho_mid - rho_target;
+            let f_low = rho_low_cached - rho_target;
 
-            let rho_low = fluid.rho(&state_low).map_err(|e| SimError::Backend {
-                message: format!("Failed to compute rho: {}", e),
-            })?;
-
-            if (rho_low.value - rho_target) * (rho_mid.value - rho_target) < 0.0 {
+            if f_low * f_mid < 0.0 {
+                // Root in [p_low, p_mid]
                 p_high = p_mid;
+                rho_high_cached = rho_mid;
             } else {
+                // Root in [p_mid, p_high]
                 p_low = p_mid;
+                rho_low_cached = rho_mid;
+            }
+
+            // Early exit if bracket is tight enough
+            if (p_high - p_low) / p_low < 1e-6 {
+                return Ok(Pressure::new::<uom::si::pressure::pascal>(
+                    0.5 * (p_low + p_high),
+                ));
             }
         }
 
         Err(SimError::ConvergenceFailed {
-            what: "pressure_from_rho_h: bisection did not converge",
+            what: "pressure_from_rho_h: bisection did not converge within iteration limit",
         })
     }
 
@@ -233,6 +242,22 @@ impl ControlVolume {
 
         let rho = self.density(state);
         let p = self.pressure_from_rho_h(fluid, rho, state.h_j_per_kg, p_hint)?;
+
+        // Validate that the computed (P,h) combination is valid for the fluid model
+        fluid
+            .state(
+                tf_fluids::StateInput::PH {
+                    p,
+                    h: state.h_j_per_kg,
+                },
+                self.composition.clone(),
+            )
+            .map_err(|e| SimError::Backend {
+                message: format!(
+                    "CV '{}' state (P={:.1} Pa, h={:.1} J/kg, rho={:.3} kg/m³, m={:.4} kg, V={:.6} m³) produces invalid fluid state: {}",
+                    self.name, p.value, state.h_j_per_kg, rho, state.m_kg, self.volume_m3, e
+                ),
+            })?;
 
         Ok((p, state.h_j_per_kg))
     }

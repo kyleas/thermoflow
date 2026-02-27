@@ -9,14 +9,21 @@
 use std::collections::{HashMap, HashSet};
 
 use tf_components::{Orifice, Pipe, Pump, Turbine, TwoPortComponent, Valve, ValveLaw};
+use tf_core::timing::Timer;
 use tf_core::units::{kgps, m, pa, Area, DynVisc, Pressure, Temperature};
 use tf_core::{CompId, NodeId};
-use tf_fluids::{Composition, FluidModel, SpecEnthalpy, StateInput};
+use tf_fluids::{
+    Composition, FluidModel, FrozenPropertySurrogate, SpecEnthalpy, StateInput, ThermoState,
+};
 use tf_project::schema::{
     ActionDef, BoundaryDef, ComponentDef, ComponentKind, NodeDef, NodeKind, ScheduleDef, SystemDef,
     ValveLawDef,
 };
-use tf_sim::{ControlVolume, ControlVolumeState, SimError, SimResult, TransientModel};
+use tf_project::CvInitMode;
+use tf_sim::{
+    junction_thermal::{JunctionThermalConfig, JunctionThermalState},
+    ControlVolume, ControlVolumeState, SimError, SimResult, TransientModel,
+};
 use tf_solver::{SteadyProblem, SteadySolution};
 use uom::si::area::square_meter;
 use uom::si::dynamic_viscosity::pascal_second;
@@ -55,8 +62,26 @@ pub struct TransientNetworkModel {
     schedules: ScheduleData,
     last_steady_solution: Option<SteadySolution>,
     last_cv_pressure: Vec<Option<Pressure>>,
+    last_cv_enthalpy: Vec<Option<f64>>, // CoolProp-compatible h when fallback is active
     solution_cache: HashMap<i64, SteadySolution>,
     last_active_components: HashSet<CompId>,
+    last_valve_positions: HashMap<String, f64>, // Track valve positions for continuation
+    last_time: f64,                             // Track last solve time for event detection
+
+    // Thermodynamic fallback surrogates: one per control volume for robustness
+    // Built from the last valid real-fluid state; used when CoolProp fails mid-solve
+    cv_surrogate_models: Vec<Option<FrozenPropertySurrogate>>,
+
+    // Diagnostic counters for observability
+    real_fluid_attempts: usize, // How many times we tried real-fluid state creation
+    real_fluid_successes: usize, // How many times real-fluid succeeded
+    surrogate_populations: usize, // How many times we populated/updated surrogates
+    fallback_uses: usize,       // How many times we actually used fallback during solve
+
+    // Junction thermal regularization for transient mode
+    junction_thermal_state: JunctionThermalState,
+    junction_thermal_config: JunctionThermalConfig,
+    junction_node_ids: Vec<NodeId>, // Track which nodes are junctions (not CVs)
 }
 
 struct Snapshot {
@@ -76,6 +101,34 @@ impl TransientNetworkModel {
                 .map_err(|e| AppError::TransientCompile { message: e })?;
 
         let last_cv_pressure = vec![None; control_volumes.len()];
+        let last_cv_enthalpy = vec![None; control_volumes.len()];
+
+        // Initialize valve positions from component definitions
+        let mut last_valve_positions = HashMap::new();
+        for component in &system.components {
+            if let ComponentKind::Valve { position, .. } = &component.kind {
+                last_valve_positions.insert(component.id.clone(), *position);
+            }
+        }
+
+        // Initialize surrogate models (empty until first valid state)
+        let cv_surrogate_models = vec![None; control_volumes.len()];
+
+        // Identify junction nodes (explicit Junction kind only; Atmosphere is fixed)
+        let junction_node_ids: Vec<NodeId> = system
+            .nodes
+            .iter()
+            .filter_map(|node| match node.kind {
+                NodeKind::Junction => runtime.node_id_map.get(&node.id).copied(),
+                _ => None,
+            })
+            .collect();
+
+        eprintln!(
+            "[TRANSIENT] Junction thermal regularization: {} junction nodes, {} CV nodes",
+            junction_node_ids.len(),
+            cv_node_ids.len()
+        );
 
         Ok(Self {
             system: system.clone(),
@@ -94,9 +147,112 @@ impl TransientNetworkModel {
             schedules,
             last_steady_solution: None,
             last_cv_pressure,
+            last_cv_enthalpy,
             solution_cache: HashMap::new(),
             last_active_components: HashSet::new(),
+            last_valve_positions,
+            last_time: 0.0,
+            cv_surrogate_models,
+            real_fluid_attempts: 0,
+            real_fluid_successes: 0,
+            surrogate_populations: 0,
+            fallback_uses: 0,
+            junction_thermal_state: JunctionThermalState::new(),
+            junction_thermal_config: JunctionThermalConfig::default(),
+            junction_node_ids,
         })
+    }
+
+    /// Number of times fallback surrogate state creation was used.
+    pub fn fallback_uses(&self) -> usize {
+        self.fallback_uses
+    }
+
+    /// Print transient simulation diagnostics.
+    pub fn print_diagnostics(&self) {
+        eprintln!("\n========== TRANSIENT SIMULATION DIAGNOSTICS ==========");
+        eprintln!(
+            "Real-fluid state creation attempts:  {}",
+            self.real_fluid_attempts
+        );
+        eprintln!(
+            "Real-fluid state creation successes: {}",
+            self.real_fluid_successes
+        );
+        if self.real_fluid_attempts > 0 {
+            let success_rate =
+                (self.real_fluid_successes as f64) / (self.real_fluid_attempts as f64) * 100.0;
+            eprintln!("Real-fluid success rate:              {:.1}%", success_rate);
+        }
+        eprintln!(
+            "Surrogate population events:          {}",
+            self.surrogate_populations
+        );
+        eprintln!(
+            "Fallback activations (surrogate use): {}",
+            self.fallback_uses
+        );
+        if self.fallback_uses > 0 {
+            eprintln!(
+                "\n⚠️  FALLBACK WAS USED - Real-fluid path failed {} times",
+                self.fallback_uses
+            );
+            eprintln!(
+                "    This indicates the solver encountered states outside CoolProp's valid region."
+            );
+            eprintln!("    Surrogate approximations were used to continue the simulation.");
+        } else if self.real_fluid_attempts > 0 {
+            eprintln!("\n✓  ALL STATES USED REAL-FLUID THERMODYNAMICS");
+            eprintln!("    Surrogates were populated but never needed.");
+        }
+        eprintln!("======================================================\n");
+    }
+
+    /// Create fluid state with fallback: try real-fluid first, use surrogate approximation on failure.
+    ///
+    /// When CoolProp rejects (P, h), estimate T from h using surrogate and create a PT state.
+    /// This allows the transient solve to continue with approximate thermodynamics.
+    fn create_state_with_fallback(
+        &mut self,
+        p: Pressure,
+        h: f64,
+        node_idx: usize,
+    ) -> SimResult<ThermoState> {
+        // Try real-fluid state first
+        self.real_fluid_attempts += 1;
+        match self
+            .fluid_model
+            .state(StateInput::PH { p, h }, self.composition.clone())
+        {
+            Ok(state) => {
+                self.real_fluid_successes += 1;
+                Ok(state)
+            }
+            Err(_) => {
+                // Real-fluid failed: use surrogate to estimate T from h
+                self.fallback_uses += 1;
+                // Use any available CV surrogate or create emergency estimate
+                let t_est = if let Some(Some(ref surrogate)) =
+                    self.cv_surrogate_models.iter().find(|s| s.is_some())
+                {
+                    let t = surrogate.estimate_temperature_from_h(h);
+                    tf_core::units::k(t)
+                } else {
+                    // No surrogate available: use default T=300K
+                    tf_core::units::k(300.0)
+                };
+
+                // Create approximate PT state
+                ThermoState::from_pt(p, t_est, self.composition.clone()).map_err(|e| {
+                    SimError::Backend {
+                        message: format!(
+                            "Failed to create fallback state for node {}: {}",
+                            node_idx, e
+                        ),
+                    }
+                })
+            }
+        }
     }
 
     pub fn build_timeseries_record(
@@ -158,6 +314,8 @@ impl TransientNetworkModel {
     }
 
     fn solve_snapshot(&mut self, time_s: f64, state: &TransientState) -> SimResult<Snapshot> {
+        let _timer = Timer::start("transient_snapshot_solve");
+
         let mut problem = SteadyProblem::new(
             &self.runtime.graph,
             self.fluid_model.as_ref(),
@@ -177,12 +335,14 @@ impl TransientNetworkModel {
         }
 
         let boundary_defs = apply_boundary_schedules(&self.system, &self.schedules, time_s);
-        let boundaries =
-            runtime_compile::parse_boundaries(&boundary_defs, &self.runtime.node_id_map).map_err(
-                |e| SimError::Backend {
-                    message: format!("{}", e),
-                },
-            )?;
+        let boundaries = runtime_compile::parse_boundaries_with_atmosphere(
+            &self.system,
+            &boundary_defs,
+            &self.runtime.node_id_map,
+        )
+        .map_err(|e| SimError::Backend {
+            message: format!("Failed to parse boundaries: {}", e),
+        })?;
 
         for (node_id, bc) in &boundaries {
             match bc {
@@ -203,11 +363,185 @@ impl TransientNetworkModel {
             let cv_state = &state.control_volumes[idx];
             let p_hint = self.last_cv_pressure[idx];
 
-            let (p, h) = cv.state_ph_boundary(self.fluid_model.as_ref(), cv_state, p_hint)?;
-            self.last_cv_pressure[idx] = Some(p);
+            eprintln!(
+                "[DEBUG] CV '{}' at t={:.4}s: trying state_ph_boundary with rho={:.3}, h={:.1}",
+                cv.name,
+                time_s,
+                cv.density(cv_state),
+                cv_state.h_j_per_kg
+            );
 
-            problem.set_pressure_bc(node_id, p)?;
-            problem.set_enthalpy_bc(node_id, h)?;
+            // Try real-fluid boundary computation
+            match cv.state_ph_boundary(self.fluid_model.as_ref(), cv_state, p_hint) {
+                Ok((p, h)) => {
+                    // Real-fluid succeeded: update surrogate from this valid state
+                    self.last_cv_pressure[idx] = Some(p);
+                    self.last_cv_enthalpy[idx] = Some(h); // Store actual h
+
+                    // Build/update surrogate for future fallback
+                    if let Ok(valid_state) = self
+                        .fluid_model
+                        .state(tf_fluids::StateInput::PH { p, h }, cv.composition.clone())
+                    {
+                        if let Ok(cp_val) = self.fluid_model.cp(&valid_state) {
+                            let t = valid_state.temperature();
+                            let rho = cv.density(cv_state);
+                            let molar_mass = cv.composition.molar_mass();
+
+                            let surrogate = tf_fluids::surrogate::FrozenPropertySurrogate::new(
+                                p.value, t.value, h, rho, cp_val, molar_mass,
+                            );
+
+                            self.cv_surrogate_models[idx] = Some(surrogate);
+                        }
+                    }
+
+                    problem.set_pressure_bc(node_id, p)?;
+                    problem.set_enthalpy_bc(node_id, h)?;
+                }
+                Err(e) => {
+                    // Real-fluid failed: use surrogate fallback
+                    eprintln!(
+                        "[FALLBACK] CV '{}' at t={:.3}s: state_ph_boundary failed: {}",
+                        cv.name, time_s, e
+                    );
+                    self.fallback_uses += 1;
+
+                    let rho = cv.density(cv_state);
+                    let h_cv = cv_state.h_j_per_kg;
+
+                    // Use existing surrogate or create a default one
+                    if let Some(ref surrogate) = self.cv_surrogate_models[idx] {
+                        // Use surrogate to estimate P and T from (ρ, h)
+                        let p_fallback = surrogate.estimate_pressure_from_rho_h(rho, h_cv);
+                        let t_fallback = surrogate.estimate_temperature_from_h(h_cv);
+
+                        let p = tf_core::units::pa(p_fallback);
+                        let t = tf_core::units::k(t_fallback);
+
+                        // Try to create a CoolProp-compatible state from (P, T) and get h
+                        match self
+                            .fluid_model
+                            .state(StateInput::PT { p, t }, cv.composition.clone())
+                        {
+                            Ok(state) => {
+                                // Use CoolProp h for this (P, T) state to ensure compatibility
+                                if let Ok(h_compatible) = self.fluid_model.h(&state) {
+                                    self.last_cv_pressure[idx] = Some(p);
+                                    self.last_cv_enthalpy[idx] = Some(h_compatible);
+                                    problem.set_pressure_bc(node_id, p)?;
+                                    problem.set_enthalpy_bc(node_id, h_compatible)?;
+                                } else {
+                                    // Fallback failed - use approximations
+                                    self.last_cv_pressure[idx] = Some(p);
+                                    self.last_cv_enthalpy[idx] = Some(h_cv);
+                                    problem.set_pressure_bc(node_id, p)?;
+                                    problem.set_enthalpy_bc(node_id, h_cv)?;
+                                }
+                            }
+                            Err(_) => {
+                                // PT state also failed - use approximations
+                                self.last_cv_pressure[idx] = Some(p);
+                                self.last_cv_enthalpy[idx] = Some(h_cv);
+                                problem.set_pressure_bc(node_id, p)?;
+                                problem.set_enthalpy_bc(node_id, h_cv)?;
+                            }
+                        }
+                    } else {
+                        // No surrogate available: use ideal gas approximation with default T=300K
+                        let t_guess = 300.0;
+                        let molar_mass = cv.composition.molar_mass();
+                        let r_specific = 8314.462618 / molar_mass;
+
+                        // P = ρ * R_specific * T
+                        let p_fallback = rho * r_specific * t_guess;
+                        let p = tf_core::units::pa(p_fallback);
+                        let t = tf_core::units::k(t_guess);
+
+                        // Try to get CoolProp-compatible h
+                        match self
+                            .fluid_model
+                            .state(StateInput::PT { p, t }, cv.composition.clone())
+                        {
+                            Ok(state) => {
+                                if let Ok(h_compatible) = self.fluid_model.h(&state) {
+                                    self.last_cv_pressure[idx] = Some(p);
+                                    self.last_cv_enthalpy[idx] = Some(h_compatible);
+                                    problem.set_pressure_bc(node_id, p)?;
+                                    problem.set_enthalpy_bc(node_id, h_compatible)?;
+                                } else {
+                                    self.last_cv_pressure[idx] = Some(p);
+                                    self.last_cv_enthalpy[idx] = Some(h_cv);
+                                    problem.set_pressure_bc(node_id, p)?;
+                                    problem.set_enthalpy_bc(node_id, h_cv)?;
+                                }
+                            }
+                            Err(_) => {
+                                self.last_cv_pressure[idx] = Some(p);
+                                self.last_cv_enthalpy[idx] = Some(h_cv);
+                                problem.set_pressure_bc(node_id, p)?;
+                                problem.set_enthalpy_bc(node_id, h_cv)?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply junction node boundaries using lagged enthalpies (transient thermal regularization)
+        // This avoids exact algebraic enthalpy closure at junctions during difficult transitions.
+        for &junction_node_id in &self.junction_node_ids {
+            // Check if this junction is explicitly bounded by external boundaries
+            let has_external_bc = boundaries.contains_key(&junction_node_id);
+
+            if !has_external_bc {
+                // Prefer CV-adjacent enthalpy if available to avoid stale junction states.
+                let mut cv_h_sum = 0.0;
+                let mut cv_count = 0usize;
+                for comp_info in self.runtime.graph.components() {
+                    let comp_id = comp_info.id;
+                    let inlet = self.runtime.graph.comp_inlet_node(comp_id);
+                    let outlet = self.runtime.graph.comp_outlet_node(comp_id);
+
+                    let other = if inlet == Some(junction_node_id) {
+                        outlet
+                    } else if outlet == Some(junction_node_id) {
+                        inlet
+                    } else {
+                        None
+                    };
+
+                    if let Some(other_node) = other {
+                        if let Some(&cv_idx) = self.cv_index_by_node.get(&other_node) {
+                            if let Some(cv_state) = state.control_volumes.get(cv_idx) {
+                                cv_h_sum += cv_state.h_j_per_kg;
+                                cv_count += 1;
+                            }
+                        }
+                    }
+                }
+
+                let h_cv_avg = if cv_count > 0 {
+                    Some(cv_h_sum / (cv_count as f64))
+                } else {
+                    None
+                };
+
+                let h_lagged = self
+                    .junction_thermal_state
+                    .get_lagged_enthalpy(junction_node_id);
+                let h_use = h_cv_avg.or(h_lagged);
+
+                if let Some(h_use) = h_use {
+                    // Junction pressure will still be solved algebraically, but enthalpy is anchored
+                    problem.set_enthalpy_bc(junction_node_id, h_use)?;
+
+                    eprintln!(
+                        "[JUNCTION] Node {:?} using lagged h={:.1} J/kg for t={:.4}s",
+                        junction_node_id, h_use, time_s
+                    );
+                }
+            }
         }
 
         // If the network is effectively disconnected (e.g., closed valve),
@@ -225,11 +559,12 @@ impl TransientNetworkModel {
             .map_err(|e| SimError::Backend {
                 message: format!("Failed to create ambient state: {}", e),
             })?;
-        let ambient_h = self.fluid_model.h(&ambient_state).map_err(|e| {
-            SimError::Backend {
+        let ambient_h = self
+            .fluid_model
+            .h(&ambient_state)
+            .map_err(|e| SimError::Backend {
                 message: format!("Failed to compute ambient enthalpy: {}", e),
-            }
-        })?;
+            })?;
 
         let active_components = active_component_ids(
             &self.system,
@@ -261,9 +596,9 @@ impl TransientNetworkModel {
             .collect();
 
         let mut transition_guess: Option<SteadySolution> = None;
-        
+
         // Detect large mode changes to enable adaptive solver tolerance
-        let is_mode_transition = self.last_active_components != active_components 
+        let is_mode_transition = self.last_active_components != active_components
             && active_components.len() > self.last_active_components.len();
 
         if self.last_active_components != active_components {
@@ -271,76 +606,439 @@ impl TransientNetworkModel {
             if let Some(prev) = &self.last_steady_solution {
                 let mut adjusted = prev.clone();
                 let mut node_states = Vec::new();
-                for (i, (&p, &h)) in prev.pressures.iter().zip(prev.enthalpies.iter()).enumerate()
-                {
-                    let state = self
+                let mut all_states_valid = true;
+
+                for (&p, &h) in prev.pressures.iter().zip(prev.enthalpies.iter()) {
+                    match self
                         .fluid_model
                         .state(StateInput::PH { p, h }, self.composition.clone())
-                        .map_err(|e| SimError::Backend {
-                            message: format!("Failed to create state for node {}: {}", i, e),
-                        })?;
-                    node_states.push(state);
+                    {
+                        Ok(state) => node_states.push(state),
+                        Err(_) => {
+                            // Invalid P,h combination (often near saturation or phase boundary).
+                            // Skip warm start entirely rather than fail.
+                            all_states_valid = false;
+                            break;
+                        }
+                    }
                 }
 
-                for (comp_id, mdot) in &mut adjusted.mass_flows {
-                    if !active_components.contains(comp_id) {
-                        *mdot = 0.0;
-                        continue;
-                    }
+                if all_states_valid {
+                    for (comp_id, mdot) in &mut adjusted.mass_flows {
+                        if !active_components.contains(comp_id) {
+                            *mdot = 0.0;
+                            continue;
+                        }
 
-                    let inlet_node = match self.runtime.graph.comp_inlet_node(*comp_id) {
-                        Some(node) => node,
-                        None => continue,
-                    };
-                    let outlet_node = match self.runtime.graph.comp_outlet_node(*comp_id) {
-                        Some(node) => node,
-                        None => continue,
-                    };
-                    let inlet_state = &node_states[inlet_node.index() as usize];
-                    let outlet_state = &node_states[outlet_node.index() as usize];
-
-                    if let Some(component) = problem.components.get(comp_id) {
-                        let ports = tf_components::PortStates {
-                            inlet: inlet_state,
-                            outlet: outlet_state,
+                        let inlet_node = match self.runtime.graph.comp_inlet_node(*comp_id) {
+                            Some(node) => node,
+                            None => continue,
                         };
-                        if let Ok(mdot_est) = component.mdot(self.fluid_model.as_ref(), ports) {
-                            *mdot = mdot_est.value;
+                        let outlet_node = match self.runtime.graph.comp_outlet_node(*comp_id) {
+                            Some(node) => node,
+                            None => continue,
+                        };
+                        let inlet_state = &node_states[inlet_node.index() as usize];
+                        let outlet_state = &node_states[outlet_node.index() as usize];
+
+                        let is_newly_activated = !self.last_active_components.contains(comp_id);
+
+                        if let Some(component) = problem.components.get(comp_id) {
+                            let ports = tf_components::PortStates {
+                                inlet: inlet_state,
+                                outlet: outlet_state,
+                            };
+                            match component.mdot(self.fluid_model.as_ref(), ports) {
+                                Ok(mdot_est) => {
+                                    *mdot = mdot_est.value;
+                                }
+                                Err(_) => {
+                                    // If flow estimation fails, use a small positive seed for newly-active components
+                                    // This helps Newton find the correct region for mode transitions
+                                    *mdot = if is_newly_activated { 0.001 } else { 0.0 };
+                                }
+                            }
+                        } else if is_newly_activated {
+                            // Component not in problem yet? Seed with small positive flow to guide Newton
+                            *mdot = 0.001;
                         } else {
                             *mdot = 0.0;
                         }
                     }
-                }
-                transition_guess = Some(adjusted);
+                    transition_guess = Some(adjusted);
+                } // end if all_states_valid
             }
             self.solution_cache.clear();
         }
 
-        let warm_start = transition_guess.as_ref().or(self.last_steady_solution.as_ref());
+        // Check for large valve position changes that need continuation
+        let mut valve_changes: HashMap<String, (f64, f64)> = HashMap::new(); // (prev_pos, target_pos)
+        for component in &self.system.components {
+            if let ComponentKind::Valve { position, .. } = &component.kind {
+                let mut target_pos = *position;
+                if let Some(events) = self.schedules.valve_events.get(&component.id) {
+                    if let Some(value) = last_event_value(events, time_s) {
+                        target_pos = value;
+                    }
+                }
 
-        // Use adaptive solver config for mode transitions: allow more iterations
-        let solver_config = if is_mode_transition {
-            Some(tf_solver::NewtonConfig {
-                max_iterations: 250,    // Increased from default 200
-                ..Default::default()    // Keep strict tolerances and default line search
-            })
+                if let Some(&prev_pos) = self.last_valve_positions.get(&component.id) {
+                    let delta = (target_pos - prev_pos).abs();
+                    // Detect significant valve opening (threshold 0.05) that needs continuation
+                    if delta > 0.05 && prev_pos < 0.05 && target_pos > prev_pos {
+                        valve_changes.insert(component.id.clone(), (prev_pos, target_pos));
+                    }
+                }
+            }
+        }
+
+        let needs_continuation = !valve_changes.is_empty() && is_mode_transition;
+
+        // For mode transitions, skip warm start if the previous states were invalid
+        // This avoids Newton starting with P,h combinations outside the valid fluid region
+        let warm_start = if is_mode_transition {
+            transition_guess.as_ref()
         } else {
-            None  // Use default config for normal timesteps
+            transition_guess
+                .as_ref()
+                .or(self.last_steady_solution.as_ref())
         };
 
-        let solution = tf_solver::solve_with_active(
-            &mut problem,
-            solver_config,
-            warm_start,
-            &active_components,
-        )
-        .map_err(|e| SimError::Backend {
-            message: format!("Solver failed at t={}: {}", time_s, e),
-        })?;
+        // Use adaptive solver config for mode transitions
+        let solver_config = if is_mode_transition {
+            Some(tf_solver::NewtonConfig {
+                max_iterations: 250,
+                enthalpy_delta_abs: 3.0e5,
+                enthalpy_delta_rel: 0.5,
+                enthalpy_total_abs: 8.0e5,
+                enthalpy_total_rel: 2.0,
+                weak_flow_mdot: 0.5,
+                weak_flow_enthalpy_scale: 0.25,
+                ..Default::default()
+            })
+        } else {
+            None
+        };
+
+        // Create fallback policy for continuation and solver recovery
+        let num_nodes = self.runtime.graph.nodes().len();
+        let make_policy = |warm_start: Option<&SteadySolution>| {
+            let mut fallback_policy =
+                crate::transient_fallback_policy::TransientFallbackPolicy::new(num_nodes);
+            let mut populated_count = 0;
+
+            if let Some(ws) = warm_start {
+                for node_idx in 0..num_nodes {
+                    if let (Some(&p), Some(&h)) =
+                        (ws.pressures.get(node_idx), ws.enthalpies.get(node_idx))
+                    {
+                        match self
+                            .fluid_model
+                            .state(StateInput::PH { p, h }, self.composition.clone())
+                        {
+                            Ok(state) => {
+                                let t = state.temperature();
+                                let rho = match self.fluid_model.rho(&state) {
+                                    Ok(rho_qty) => rho_qty.value,
+                                    Err(_) => 1.0,
+                                };
+                                let cp = self.fluid_model.cp(&state).unwrap_or(1000.0);
+                                let molar_mass = self.composition.molar_mass();
+                                fallback_policy.update_surrogate(
+                                    node_idx,
+                                    crate::transient_fallback_policy::SurrogateSample {
+                                        p,
+                                        t: t.value,
+                                        h,
+                                        rho,
+                                        cp,
+                                        molar_mass,
+                                    },
+                                );
+                                populated_count += 1;
+                            }
+                            Err(_) => {
+                                // Skip invalid states - surrogate won't be available for this node
+                            }
+                        }
+                    }
+                }
+                // Only log summary, not every node
+                if populated_count > 0 {
+                    eprintln!(
+                        "[SURROGATE] Populated {} node surrogates from warm-start",
+                        populated_count
+                    );
+                }
+            }
+
+            fallback_policy
+        };
+
+        // Apply continuation strategy if needed
+        let solution = if needs_continuation {
+            const BASE_SUBSTEPS: usize = 20; // Increased from 12 to be more aggressive from start
+            const MAX_CONTINUATION_RETRIES: usize = 4;
+
+            let mut substeps = BASE_SUBSTEPS;
+            let mut last_error: Option<String> = None;
+            let mut continuation_solution: Option<SteadySolution> = None;
+
+            for retry in 0..=MAX_CONTINUATION_RETRIES {
+                // Progressively relax enthalpy limits as retries increase.
+                // The goal is to give Newton maximum freedom on later retries to find _any_ converged solution.
+                let (delta_abs, total_abs, weak_flow_scale) = if retry == 0 {
+                    // First attempt: tight limits
+                    (2.5e5, 6.0e5, 0.2)
+                } else if retry == 1 {
+                    // Retry 1: moderate relaxation
+                    (6.0e5, 1.5e6, 0.3)
+                } else if retry == 2 {
+                    // Retry 2: significant relaxation
+                    (1.5e6, 3.0e6, 0.5)
+                } else {
+                    // Retries 3-4: maximum relaxation - essentially unconstraint
+                    (f64::INFINITY, f64::INFINITY, 1.0)
+                };
+
+                let continuation_config = Some(tf_solver::NewtonConfig {
+                    max_iterations: 300,
+                    line_search_beta: 0.4,
+                    max_line_search_iters: 40,
+                    enthalpy_delta_abs: delta_abs,
+                    enthalpy_delta_rel: 0.5,
+                    enthalpy_total_abs: total_abs,
+                    enthalpy_total_rel: 1.5,
+                    weak_flow_mdot: 0.5,
+                    weak_flow_enthalpy_scale: weak_flow_scale,
+                    ..Default::default()
+                });
+
+                let mut fallback_policy = make_policy(warm_start);
+                let mut current_solution = warm_start.cloned();
+                let mut retry_failed = false;
+
+                for substep in 1..=substeps {
+                    let alpha = (substep as f64) / (substeps as f64);
+
+                    // Build valve position overrides for this substep
+                    let mut valve_overrides = HashMap::new();
+                    for (comp_id, (prev_pos, target_pos)) in &valve_changes {
+                        let effective_prev = prev_pos.max(0.001);
+                        let interp_pos = effective_prev + alpha * (target_pos - effective_prev);
+                        valve_overrides.insert(comp_id.clone(), interp_pos);
+                    }
+
+                    // Rebuild problem with intermediate valve positions
+                    let mut substep_problem = SteadyProblem::new(
+                        &self.runtime.graph,
+                        self.fluid_model.as_ref(),
+                        self.composition.clone(),
+                    );
+
+                    let mut components_substep = build_components_with_valve_overrides(
+                        &self.system,
+                        &self.runtime.comp_id_map,
+                        &self.schedules,
+                        time_s,
+                        &valve_overrides,
+                    )
+                    .map_err(|e| SimError::Backend { message: e })?;
+
+                    for (comp_id, component) in components_substep.drain() {
+                        substep_problem.add_component(comp_id, component)?;
+                    }
+
+                    // Apply same boundary conditions
+                    for (node_id, bc) in &boundaries {
+                        match bc {
+                            crate::runtime_compile::BoundaryCondition::PT { p, t } => {
+                                substep_problem.set_pressure_bc(*node_id, *p)?;
+                                substep_problem.set_temperature_bc(*node_id, *t)?;
+                            }
+                            crate::runtime_compile::BoundaryCondition::PH { p, h } => {
+                                substep_problem.set_pressure_bc(*node_id, *p)?;
+                                substep_problem.set_enthalpy_bc(*node_id, *h)?;
+                            }
+                        }
+                    }
+
+                    // Apply control-volume boundaries (internal junctions)
+                    // For continuation retries, keep enthalpy boundaries fixed but relax solver limits above
+                    for (idx, &node_id) in self.cv_node_ids.iter().enumerate() {
+                        let p = self.last_cv_pressure[idx].ok_or_else(|| SimError::Backend {
+                            message: "CV pressure not set".to_string(),
+                        })?;
+                        let h = self.last_cv_enthalpy[idx]
+                            .unwrap_or(state.control_volumes[idx].h_j_per_kg);
+
+                        substep_problem.set_pressure_bc(node_id, p)?;
+                        substep_problem.set_enthalpy_bc(node_id, h)?;
+                    }
+
+                    // Do NOT apply junction enthalpy BCs during continuation substeps.
+                    // The junction thermal regularization is only for the main timestep solve.
+                    // During continuation, we need to let junction enthalpy vary freely to find
+                    // a feasible path through the topology change (e.g., valve opening).
+                    // Over-constraining the system by fixing junction enthalpy causes the Newton
+                    // solver to fail with "line search failed to find valid step" errors.
+
+                    substep_problem.convert_all_temperature_bcs().map_err(|e| {
+                        SimError::Backend {
+                            message: format!("Failed to convert temperature BCs: {}", e),
+                        }
+                    })?;
+
+                    let inactive_substep = apply_blocked_subgraph_bcs(
+                        &mut substep_problem,
+                        &self.system,
+                        &self.runtime.comp_id_map,
+                        &self.schedules,
+                        time_s,
+                        ambient_p,
+                        ambient_h,
+                        &self.last_active_components,
+                    )?;
+
+                    let active_substep: HashSet<CompId> = active_components
+                        .difference(&inactive_substep)
+                        .copied()
+                        .collect();
+
+                    let substep_solution = match tf_solver::solve_with_active_and_policy(
+                        &mut substep_problem,
+                        continuation_config,
+                        current_solution.as_ref(),
+                        &active_substep,
+                        &fallback_policy,
+                    ) {
+                        Ok(solution) => solution,
+                        Err(e) => {
+                            last_error = Some(format!(
+                                "Continuation substep {}/{} failed at t={}: {}",
+                                substep, substeps, time_s, e
+                            ));
+                            retry_failed = true;
+                            break;
+                        }
+                    };
+
+                    // Update surrogates from successful solution so next substep uses better fallbacks
+                    let mut updated_count = 0;
+                    for node_idx in 0..num_nodes {
+                        if let (Some(&p), Some(&h)) = (
+                            substep_solution.pressures.get(node_idx),
+                            substep_solution.enthalpies.get(node_idx),
+                        ) {
+                            match self
+                                .fluid_model
+                                .state(StateInput::PH { p, h }, self.composition.clone())
+                            {
+                                Ok(state) => {
+                                    let t = state.temperature();
+                                    let rho = match self.fluid_model.rho(&state) {
+                                        Ok(rho_qty) => rho_qty.value,
+                                        Err(_) => 1.0,
+                                    };
+                                    let cp = self.fluid_model.cp(&state).unwrap_or(1000.0);
+                                    let molar_mass = self.composition.molar_mass();
+                                    fallback_policy.update_surrogate(
+                                        node_idx,
+                                        crate::transient_fallback_policy::SurrogateSample {
+                                            p,
+                                            t: t.value,
+                                            h,
+                                            rho,
+                                            cp,
+                                            molar_mass,
+                                        },
+                                    );
+                                    updated_count += 1;
+                                }
+                                Err(_) => {
+                                    // Skip invalid states
+                                }
+                            }
+                        }
+                    }
+                    if updated_count > 0 && substep == substeps {
+                        // Only log at final substep to reduce verbosity
+                        eprintln!(
+                            "[SURROGATE] Updated {} surrogates from final substep",
+                            updated_count
+                        );
+                    }
+
+                    current_solution = Some(substep_solution);
+                }
+
+                if !retry_failed {
+                    continuation_solution = current_solution;
+                    if continuation_solution.is_some() {
+                        break;
+                    }
+                }
+
+                if retry < MAX_CONTINUATION_RETRIES {
+                    let next_substeps = ((substeps as f64) * 1.5).ceil() as usize;
+                    eprintln!(
+                        "[CUTBACK] Continuation retry {}/{}: substeps {} -> {}",
+                        retry + 1,
+                        MAX_CONTINUATION_RETRIES,
+                        substeps,
+                        next_substeps
+                    );
+                    substeps = next_substeps;
+                }
+            }
+
+            continuation_solution.ok_or_else(|| SimError::Retryable {
+                message: format!(
+                    "Continuation failed after {} retries: {}",
+                    MAX_CONTINUATION_RETRIES + 1,
+                    last_error.unwrap_or_else(|| "unknown continuation error".to_string())
+                ),
+            })?
+        } else {
+            let fallback_policy = make_policy(warm_start);
+            tf_solver::solve_with_active_and_policy(
+                &mut problem,
+                solver_config,
+                warm_start,
+                &active_components,
+                &fallback_policy,
+            )
+            .map_err(|e| {
+                if is_mode_transition {
+                    SimError::Retryable {
+                        message: format!("Solver failed at t={}: {}", time_s, e),
+                    }
+                } else {
+                    SimError::Backend {
+                        message: format!("Solver failed at t={}: {}", time_s, e),
+                    }
+                }
+            })?
+        };
+
+        // Update tracked valve positions
+        for component in &self.system.components {
+            if let ComponentKind::Valve { position, .. } = &component.kind {
+                let mut target_pos = *position;
+                if let Some(events) = self.schedules.valve_events.get(&component.id) {
+                    if let Some(value) = last_event_value(events, time_s) {
+                        target_pos = value;
+                    }
+                }
+                self.last_valve_positions
+                    .insert(component.id.clone(), target_pos);
+            }
+        }
 
         self.last_steady_solution = Some(solution.clone());
         self.store_solution_cache(time_s, solution.clone());
         self.last_active_components = active_components.clone();
+        self.last_time = time_s;
 
         let components_for_snapshot = build_components_with_schedules(
             &self.system,
@@ -349,6 +1047,10 @@ impl TransientNetworkModel {
             time_s,
         )
         .map_err(|e| SimError::Backend { message: e })?;
+
+        // Update junction thermal state using relaxed mixing (PHASE 2)
+        // After hydraulic solve, relax junction enthalpies toward their mixed values
+        self.update_junction_thermal_state(&solution, time_s, &components_for_snapshot)?;
 
         Ok(Snapshot {
             solution,
@@ -362,6 +1064,134 @@ impl TransientNetworkModel {
         if self.solution_cache.len() > 500 {
             self.solution_cache.clear();
         }
+    }
+
+    /// Update junction thermal state using relaxed mixing.
+    ///
+    /// After the hydraulic solve (which used lagged junction enthalpies), compute the
+    /// target mixed enthalpy for each junction from incoming streams and relax toward it.
+    fn update_junction_thermal_state(
+        &mut self,
+        solution: &SteadySolution,
+        time_s: f64,
+        _components: &HashMap<CompId, Box<dyn TwoPortComponent>>,
+    ) -> SimResult<()> {
+        // On first call, initialize junction enthalpies from solved state
+        if self.junction_thermal_state.update_count == 0 {
+            for &junction_node_id in &self.junction_node_ids {
+                let node_idx = junction_node_id.index() as usize;
+                if let Some(&h) = solution.enthalpies.get(node_idx) {
+                    self.junction_thermal_state.set_initial(junction_node_id, h);
+                    eprintln!(
+                        "[JUNCTION] Node {:?} initialized with h={:.1} J/kg",
+                        junction_node_id, h
+                    );
+                }
+            }
+            self.junction_thermal_state.update_count += 1;
+            return Ok(());
+        }
+
+        // For each junction, compute mixed enthalpy from incoming streams
+        for &junction_node_id in &self.junction_node_ids {
+            let node_idx = junction_node_id.index() as usize;
+
+            // Find all components connected to this junction
+            let mut incoming_enthalpy_flux = 0.0; // mdot * h (W)
+            let mut total_incoming_mdot = 0.0; // kg/s
+
+            for comp_info in self.runtime.graph.components() {
+                let comp_id = comp_info.id;
+
+                // Check if this component flows into the junction
+                if let Some(outlet_node) = self.runtime.graph.comp_outlet_node(comp_id) {
+                    if outlet_node == junction_node_id {
+                        // This component flows into the junction
+                        if let Some((_, mdot)) =
+                            solution.mass_flows.iter().find(|(id, _)| *id == comp_id)
+                        {
+                            if *mdot > 0.0 {
+                                // Positive flow into junction
+                                if let Some(inlet_node) =
+                                    self.runtime.graph.comp_inlet_node(comp_id)
+                                {
+                                    let inlet_idx = inlet_node.index() as usize;
+                                    if let Some(&h_inlet) = solution.enthalpies.get(inlet_idx) {
+                                        incoming_enthalpy_flux += mdot * h_inlet;
+                                        total_incoming_mdot += mdot;
+                                    }
+                                }
+                            } else if *mdot < 0.0 {
+                                // Reverse flow: junction flows back into component outlet
+                                // Use junction's own enthalpy
+                                if let Some(&h_junction) = solution.enthalpies.get(node_idx) {
+                                    incoming_enthalpy_flux += mdot.abs() * h_junction;
+                                    total_incoming_mdot += mdot.abs();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Check if this component draws from the junction
+                if let Some(inlet_node) = self.runtime.graph.comp_inlet_node(comp_id) {
+                    if inlet_node == junction_node_id {
+                        // This component draws from the junction
+                        if let Some((_, mdot)) =
+                            solution.mass_flows.iter().find(|(id, _)| *id == comp_id)
+                        {
+                            if *mdot < 0.0 {
+                                // Reverse flow: component outlet flows back into junction
+                                if let Some(outlet_node) =
+                                    self.runtime.graph.comp_outlet_node(comp_id)
+                                {
+                                    let outlet_idx = outlet_node.index() as usize;
+                                    if let Some(&h_outlet) = solution.enthalpies.get(outlet_idx) {
+                                        incoming_enthalpy_flux += mdot.abs() * h_outlet;
+                                        total_incoming_mdot += mdot.abs();
+                                    }
+                                }
+                            }
+                            // Positive flow out of junction doesn't contribute to incoming
+                        }
+                    }
+                }
+            }
+
+            // Compute mixed enthalpy (or keep current if no flow)
+            let h_mixed = if total_incoming_mdot > 1e-9 {
+                incoming_enthalpy_flux / total_incoming_mdot
+            } else {
+                // No incoming flow: keep current enthalpy
+                self.junction_thermal_state
+                    .get_lagged_enthalpy(junction_node_id)
+                    .unwrap_or(300_000.0) // Default if missing
+            };
+
+            // Compute time step (use default if not tracking)
+            let dt = if self.last_time > 0.0 {
+                time_s - self.last_time
+            } else {
+                0.01 // Default first step
+            };
+
+            // Update junction enthalpy using relaxed mixing
+            let h_new = self.junction_thermal_state.update_relaxed(
+                junction_node_id,
+                h_mixed,
+                dt,
+                &self.junction_thermal_config,
+            );
+
+            if total_incoming_mdot > 1e-6 {
+                eprintln!(
+                    "[JUNCTION] Node {:?} at t={:.4}s: h_new={:.1} J/kg, h_mixed={:.1} J/kg, mdot_in={:.4} kg/s",
+                    junction_node_id, time_s, h_new, h_mixed, total_incoming_mdot
+                );
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -383,12 +1213,7 @@ impl TransientModel for TransientNetworkModel {
             .zip(solution.enthalpies.iter())
             .enumerate()
         {
-            let state = self
-                .fluid_model
-                .state(StateInput::PH { p, h }, self.composition.clone())
-                .map_err(|e| SimError::Backend {
-                    message: format!("Failed to create state for node {}: {}", i, e),
-                })?;
+            let state = self.create_state_with_fallback(p, h, i)?;
             node_states.push(state);
         }
 
@@ -580,11 +1405,13 @@ fn initial_state_from_def(
     fluid: &dyn FluidModel,
     composition: &Composition,
 ) -> Result<ControlVolumeState, String> {
-    let mut m_kg = initial.m_kg;
-    let mut h_j_per_kg = initial.h_j_per_kg;
+    // Validate and resolve the initialization mode
+    let mode = CvInitMode::from_def(initial, &node.id)?;
 
-    if h_j_per_kg.is_none() {
-        if let (Some(p_pa), Some(t_k)) = (initial.p_pa, initial.t_k) {
+    // Compute derived thermodynamic values based on the explicit mode
+    let (m_kg, h_j_per_kg) = match mode {
+        CvInitMode::PT { p_pa, t_k } => {
+            // PT mode: compute density from (P, T), then mass from rho*V, and h from PT
             let state = fluid
                 .state(
                     StateInput::PT {
@@ -593,54 +1420,73 @@ fn initial_state_from_def(
                     },
                     composition.clone(),
                 )
-                .map_err(|e| format!("Initial state invalid for {}: {}", node.id, e))?;
+                .map_err(|e| format!("Initial state (PT) invalid for '{}': {}", node.id, e))?;
 
-            let h = fluid
-                .h(&state)
-                .map_err(|e| format!("Initial enthalpy invalid for {}: {}", node.id, e))?;
-            h_j_per_kg = Some(h);
+            let rho = fluid.rho(&state).map_err(|e| {
+                format!(
+                    "Initial density computation failed for '{}': {}",
+                    node.id, e
+                )
+            })?;
+
+            let h = fluid.h(&state).map_err(|e| {
+                format!(
+                    "Initial enthalpy computation failed for '{}': {}",
+                    node.id, e
+                )
+            })?;
+
+            (rho.value * volume_m3, h)
         }
-    }
 
-    if m_kg.is_none() {
-        if let (Some(p_pa), Some(t_k)) = (initial.p_pa, initial.t_k) {
+        CvInitMode::PH { p_pa, h_j_per_kg } => {
+            // PH mode: compute density from (P, h), then mass from rho*V
             let state = fluid
                 .state(
-                    StateInput::PT {
+                    StateInput::PH {
                         p: pa(p_pa),
-                        t: Temperature::new::<kelvin>(t_k),
+                        h: h_j_per_kg,
                     },
                     composition.clone(),
                 )
-                .map_err(|e| format!("Initial state invalid for {}: {}", node.id, e))?;
-            let rho = fluid
-                .rho(&state)
-                .map_err(|e| format!("Initial density invalid for {}: {}", node.id, e))?;
-            m_kg = Some(rho.value * volume_m3);
-        } else if let (Some(p_pa), Some(h)) = (initial.p_pa, h_j_per_kg) {
-            let state = fluid
-                .state(StateInput::PH { p: pa(p_pa), h }, composition.clone())
-                .map_err(|e| format!("Initial state invalid for {}: {}", node.id, e))?;
-            let rho = fluid
-                .rho(&state)
-                .map_err(|e| format!("Initial density invalid for {}: {}", node.id, e))?;
-            m_kg = Some(rho.value * volume_m3);
+                .map_err(|e| format!("Initial state (PH) invalid for '{}': {}", node.id, e))?;
+
+            let rho = fluid.rho(&state).map_err(|e| {
+                format!(
+                    "Initial density computation failed for '{}': {}",
+                    node.id, e
+                )
+            })?;
+
+            (rho.value * volume_m3, h_j_per_kg)
         }
-    }
 
-    let m_kg = m_kg.ok_or_else(|| {
-        format!(
-            "Control volume '{}' requires initial mass or (p,t) to derive mass",
-            node.id
-        )
-    })?;
+        CvInitMode::mT {
+            m_kg: _specified_mass,
+            t_k: _,
+        } => {
+            // mT mode: compute rho = m/V, then find P via iteration or direct CoolProp lookup
+            // For now, return an error noting that this requires more complex thermodynamic inversion
+            return Err(format!(
+                "Control volume '{}' uses mT mode, which requires iterative pressure inversion. \
+                 Please use PT mode instead (specify pressure and temperature directly).",
+                node.id
+            ));
+        }
 
-    let h_j_per_kg = h_j_per_kg.ok_or_else(|| {
-        format!(
-            "Control volume '{}' requires initial enthalpy or (p,t) to derive enthalpy",
-            node.id
-        )
-    })?;
+        CvInitMode::mH {
+            m_kg: _specified_mass,
+            h_j_per_kg: _,
+        } => {
+            // mH mode: compute rho = m/V, then find P from (rho, h)
+            // This also requires CoolProp's direct (rho, h) inversion, not available via StateInput yet
+            return Err(format!(
+                "Control volume '{}' uses mH mode, which requires thermodynamic inversion. \
+                 Please use PH mode instead (specify pressure and enthalpy directly).",
+                node.id
+            ));
+        }
+    };
 
     Ok(ControlVolumeState { m_kg, h_j_per_kg })
 }
@@ -701,12 +1547,26 @@ fn apply_boundary_schedules(
     time_s: f64,
 ) -> Vec<BoundaryDef> {
     let mut boundary_map: HashMap<String, BoundaryDef> = HashMap::new();
+    let atmosphere_nodes: std::collections::HashSet<&str> = system
+        .nodes
+        .iter()
+        .filter_map(|node| match node.kind {
+            NodeKind::Atmosphere { .. } => Some(node.id.as_str()),
+            _ => None,
+        })
+        .collect();
 
     for b in &system.boundaries {
+        if atmosphere_nodes.contains(b.node_id.as_str()) {
+            continue;
+        }
         boundary_map.insert(b.node_id.clone(), b.clone());
     }
 
     for (node_id, events) in &schedules.boundary_pressure_events {
+        if atmosphere_nodes.contains(node_id.as_str()) {
+            continue;
+        }
         if let Some(value) = last_event_value(events, time_s) {
             boundary_map
                 .entry(node_id.clone())
@@ -721,6 +1581,9 @@ fn apply_boundary_schedules(
     }
 
     for (node_id, events) in &schedules.boundary_temperature_events {
+        if atmosphere_nodes.contains(node_id.as_str()) {
+            continue;
+        }
         if let Some(value) = last_event_value(events, time_s) {
             boundary_map
                 .entry(node_id.clone())
@@ -737,6 +1600,7 @@ fn apply_boundary_schedules(
     boundary_map.into_values().collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_blocked_subgraph_bcs(
     problem: &mut SteadyProblem,
     system: &SystemDef,
@@ -812,10 +1676,12 @@ fn apply_blocked_subgraph_bcs(
         // UNLESS it contains newly-activated components (inactive -> active transition).
         // Skip this check at t ≈ 0 to allow normal startup behavior.
         let skip_newly_activated_check = last_active_components.is_empty();
-        let has_newly_activated = !skip_newly_activated_check && active_edges.iter().any(|(comp_id, inlet_idx, outlet_idx)| {
-            group.contains(inlet_idx) && group.contains(outlet_idx) 
-                && !last_active_components.contains(comp_id)
-        });
+        let has_newly_activated = !skip_newly_activated_check
+            && active_edges.iter().any(|(comp_id, inlet_idx, outlet_idx)| {
+                group.contains(inlet_idx)
+                    && group.contains(outlet_idx)
+                    && !last_active_components.contains(comp_id)
+            });
 
         if anchor_nodes.len() < 2 && !has_newly_activated {
             let (anchor_p, anchor_h) = if let Some(&idx) = anchor_nodes.first() {
@@ -872,11 +1738,7 @@ fn component_is_active(component: &ComponentDef, schedules: &ScheduleData, time_
     const HYDRAULIC_ACTIVE_FACTOR: f64 = 1e-3;
 
     match &component.kind {
-        ComponentKind::Valve {
-            position,
-            law,
-            ..
-        } => {
+        ComponentKind::Valve { position, law, .. } => {
             let mut pos = *position;
             if let Some(events) = schedules.valve_events.get(&component.id) {
                 if let Some(value) = last_event_value(events, time_s) {
@@ -899,11 +1761,13 @@ fn component_is_active(component: &ComponentDef, schedules: &ScheduleData, time_
     }
 }
 
-fn build_components_with_schedules(
+/// Build components with optional valve position overrides for continuation
+fn build_components_with_valve_overrides(
     system: &SystemDef,
     comp_id_map: &HashMap<String, CompId>,
     schedules: &ScheduleData,
     time_s: f64,
+    valve_position_overrides: &HashMap<String, f64>,
 ) -> Result<HashMap<CompId, Box<dyn TwoPortComponent>>, String> {
     let mut components: HashMap<CompId, Box<dyn TwoPortComponent>> = HashMap::new();
 
@@ -945,8 +1809,11 @@ fn build_components_with_schedules(
                     ValveLawDef::QuickOpening => ValveLaw::Linear,
                 };
 
+                // Check for override first, then schedule, then default
                 let mut pos = *position;
-                if let Some(events) = schedules.valve_events.get(&component.id) {
+                if let Some(&override_pos) = valve_position_overrides.get(&component.id) {
+                    pos = override_pos;
+                } else if let Some(events) = schedules.valve_events.get(&component.id) {
                     if let Some(value) = last_event_value(events, time_s) {
                         pos = value;
                     }
@@ -1005,6 +1872,16 @@ fn build_components_with_schedules(
     Ok(components)
 }
 
+fn build_components_with_schedules(
+    system: &SystemDef,
+    comp_id_map: &HashMap<String, CompId>,
+    schedules: &ScheduleData,
+    time_s: f64,
+) -> Result<HashMap<CompId, Box<dyn TwoPortComponent>>, String> {
+    // Use the override-capable version with empty overrides
+    build_components_with_valve_overrides(system, comp_id_map, schedules, time_s, &HashMap::new())
+}
+
 fn last_event_value(events: &[(f64, f64)], time_s: f64) -> Option<f64> {
     let mut value = None;
     for (t, v) in events {
@@ -1034,7 +1911,10 @@ mod tests {
     use super::*;
     use tf_fluids::{Composition, CoolPropModel, Species};
     use tf_graph::GraphBuilder;
-    use tf_project::schema::{ComponentDef, ComponentKind, CompositionDef, FluidDef, NodeDef, NodeKind, SystemDef, ValveLawDef};
+    use tf_project::schema::{
+        ComponentDef, ComponentKind, CompositionDef, FluidDef, NodeDef, NodeKind, SystemDef,
+        ValveLawDef,
+    };
 
     fn empty_schedules() -> ScheduleData {
         ScheduleData {
@@ -1108,7 +1988,7 @@ mod tests {
                 kind: ComponentKind::Valve {
                     cd: 0.8,
                     area_max_m2: 1e-4,
-                    position: 0.0,
+                    position: 0.5, // OPEN valve to make it active
                     law: ValveLawDef::Linear,
                     treat_as_gas: true,
                 },
@@ -1143,7 +2023,7 @@ mod tests {
             0.0,
             ambient_p,
             ambient_h,
-            &HashSet::new(),  // No previously-active components in test
+            &HashSet::new(), // No previously-active components in test
         )
         .expect("Blocked subgraph anchoring failed");
 

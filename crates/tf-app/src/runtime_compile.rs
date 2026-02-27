@@ -6,7 +6,7 @@ use tf_core::units::{Area, DynVisc, Pressure, Temperature};
 use tf_fluids::{Composition, CoolPropModel, FluidModel, Species};
 use tf_graph::GraphBuilder;
 use tf_project::schema::{
-    BoundaryDef, ComponentKind, CompositionDef, FluidDef, SystemDef, ValveLawDef,
+    BoundaryDef, ComponentKind, CompositionDef, FluidDef, NodeKind, SystemDef, ValveLawDef,
 };
 use uom::si::area::square_meter;
 use uom::si::dynamic_viscosity::pascal_second;
@@ -203,6 +203,44 @@ pub fn parse_boundaries(
         };
 
         boundaries.insert(node_id, bc);
+    }
+
+    Ok(boundaries)
+}
+
+/// Parse boundary definitions and merge explicit atmosphere nodes.
+pub fn parse_boundaries_with_atmosphere(
+    system: &SystemDef,
+    boundary_defs: &[BoundaryDef],
+    node_id_map: &HashMap<String, tf_core::NodeId>,
+) -> AppResult<HashMap<tf_core::NodeId, BoundaryCondition>> {
+    let mut boundaries = parse_boundaries(boundary_defs, node_id_map)?;
+
+    for node in &system.nodes {
+        if let NodeKind::Atmosphere {
+            pressure_pa,
+            temperature_k,
+        } = node.kind
+        {
+            let node_id = *node_id_map.get(&node.id).ok_or_else(|| {
+                AppError::Compile(format!("Atmosphere node not found: {}", node.id))
+            })?;
+
+            if boundaries.contains_key(&node_id) {
+                return Err(AppError::Compile(format!(
+                    "Atmosphere node '{}' must not also have a boundary",
+                    node.id
+                )));
+            }
+
+            boundaries.insert(
+                node_id,
+                BoundaryCondition::PT {
+                    p: Pressure::new::<pascal>(pressure_pa),
+                    t: Temperature::new::<kelvin>(temperature_k),
+                },
+            );
+        }
     }
 
     Ok(boundaries)

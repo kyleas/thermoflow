@@ -101,6 +101,16 @@ impl Composition {
     pub fn iter(&self) -> impl Iterator<Item = (Species, f64)> + '_ {
         self.items.iter().copied()
     }
+
+    /// Compute mixture molar mass [kg/kmol] from species mole fractions.
+    ///
+    /// For a mixture: M_mix = Σ (x_i * M_i) where x_i is mole fraction of species i.
+    pub fn molar_mass(&self) -> f64 {
+        self.items
+            .iter()
+            .map(|(species, mole_frac)| species.molar_mass() * mole_frac)
+            .sum()
+    }
 }
 
 #[cfg(test)]

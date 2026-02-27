@@ -475,7 +475,8 @@ impl PidView {
                             egui::Color32::LIGHT_BLUE
                         };
 
-                        let is_boundary = system.boundaries.iter().any(|b| b.node_id == node.id);
+                        let is_boundary = system.boundaries.iter().any(|b| b.node_id == node.id)
+                            || matches!(node.kind, NodeKind::Atmosphere { .. });
                         draw_node_symbol(
                             &painter,
                             &node.kind,

@@ -52,6 +52,11 @@ Within that project, users switch between **workspaces**—specialized UI views�
 - Run execution with progress feedback
 - Result inspector (node summaries, component flows)
 
+**Node kinds**:
+- **Junction**: algebraic node with no storage
+- **ControlVolume**: finite storage with transient mass/energy state
+- **Atmosphere**: infinite reservoir boundary with fixed pressure/temperature (no storage, no enthalpy solve)
+
 **Backend services**:
 - tf-project (project schema, validation)
 - tf-graph (network topology)
@@ -204,11 +209,9 @@ The project is persisted to disk via `tf-project` and `tf-app::project_service`.
 Simulation results live in a project-local run store:
 
 ```
-~/.thermoflow/runs/<project-hash>/
-├── 01_manifest.json  (system_id, timestamp, parameters)
-├── 01_timeseries.json (state history for transient; single record for steady)
-├── 02_manifest.json
-├── ...
+<project-dir>/.thermoflow/runs/<run-id>/
+├── manifest.json   (system_id, timestamp, parameters)
+├── timeseries.jsonl (state history for transient; single record for steady)
 ```
 
 Run identity is computed from system definition + parameters, ensuring deterministic caching.
@@ -239,6 +242,19 @@ This ensures:
 - No ghost results (one frontend doesn't see other's runs)
 - Reproducible debugging (CLI can replicate GUI session)
 - Rapid iteration (`tf-cli` for quick tests, `tf-ui` for interactive exploration)
+
+### 5.5 Shared Progress and Timing Reporting
+
+Run execution progress and timing are emitted from backend shared services:
+
+- `tf_app::run_service::ensure_run_with_progress`
+- `tf_app::progress::{RunProgressEvent, RunStage, SteadyProgress, TransientProgress}`
+- `tf_app::run_service::RunTimingSummary`
+
+Steady runs report stage + iteration/residual information (no fake percent).
+Transient runs report simulated-time progress fraction (`sim_time / t_end`) and cutback retry counts.
+
+`tf-cli` and `tf-ui` consume this shared API and must not implement separate execution progress logic.
 
 ## 6. UI Architecture Principles
 
@@ -320,7 +336,7 @@ Overlays come from the latest run result, ensuring the diagram stays visually sy
 |----------|-------|---------|-----------|
 | Project definition (systems, nodes, component params) | tf-project | project.yaml on disk | User (via System workspace) |
 | Layout/view state | UI app | ~/.thermoflow/ui_state.json | User (implicit via GUI) |
-| Run manifests + timeseries | tf-results | ~/.thermoflow/runs/ | Read-only (written by simulator) |
+| Run manifests + timeseries | tf-results | <project-dir>/.thermoflow/runs/ | Read-only (written by simulator) |
 | Cached analysis (e.g., sweep results) | tf-results or tf-app | ~/.thermoflow/analysis/ | Read-only until recomputed |
 | Font, theme, keybinding preferences | UI app | ~/.thermoflow/preferences.yaml | User |
 | Fluid property database | tf-fluids | Embedded RefProp or online | Read-only (external source) |

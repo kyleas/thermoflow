@@ -1,4 +1,6 @@
-//! Transient simulation model - legacy code kept for future transient support
+//! Legacy transient model retained for editor research only.
+//! Canonical transient execution uses `tf_app::run_service::ensure_run_with_progress`
+//! and `tf_app::transient_compile::TransientNetworkModel`.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -165,8 +167,12 @@ impl TransientNetworkModel {
         }
 
         let boundary_defs = apply_boundary_schedules(&self.system, &self.schedules, time_s);
-        let boundaries = project_io::parse_boundaries(&boundary_defs, &self.runtime.node_id_map)
-            .map_err(|e| SimError::Backend { message: e })?;
+        let boundaries = project_io::parse_boundaries_with_atmosphere(
+            &self.system,
+            &boundary_defs,
+            &self.runtime.node_id_map,
+        )
+        .map_err(|e| SimError::Backend { message: e })?;
 
         for (node_id, bc) in boundaries {
             match bc {
@@ -561,12 +567,26 @@ fn apply_boundary_schedules(
     time_s: f64,
 ) -> Vec<BoundaryDef> {
     let mut boundary_map: HashMap<String, BoundaryDef> = HashMap::new();
+    let atmosphere_nodes: std::collections::HashSet<&str> = system
+        .nodes
+        .iter()
+        .filter_map(|node| match node.kind {
+            NodeKind::Atmosphere { .. } => Some(node.id.as_str()),
+            _ => None,
+        })
+        .collect();
 
     for b in &system.boundaries {
+        if atmosphere_nodes.contains(b.node_id.as_str()) {
+            continue;
+        }
         boundary_map.insert(b.node_id.clone(), b.clone());
     }
 
     for (node_id, events) in &schedules.boundary_pressure_events {
+        if atmosphere_nodes.contains(node_id.as_str()) {
+            continue;
+        }
         if let Some(value) = last_event_value(events, time_s) {
             boundary_map
                 .entry(node_id.clone())
@@ -581,6 +601,9 @@ fn apply_boundary_schedules(
     }
 
     for (node_id, events) in &schedules.boundary_temperature_events {
+        if atmosphere_nodes.contains(node_id.as_str()) {
+            continue;
+        }
         if let Some(value) = last_event_value(events, time_s) {
             boundary_map
                 .entry(node_id.clone())

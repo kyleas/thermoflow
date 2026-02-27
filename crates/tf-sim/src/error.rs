@@ -14,6 +14,9 @@ pub enum SimError {
     #[error("Convergence failed: {what}")]
     ConvergenceFailed { what: &'static str },
 
+    #[error("Retryable error: {message}")]
+    Retryable { message: String },
+
     #[error("Backend error: {message}")]
     Backend { message: String },
 }

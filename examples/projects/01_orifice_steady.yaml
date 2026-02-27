@@ -1,4 +1,4 @@
-version: 1
+version: 2
 name: "Orifice Steady Example"
 systems:
   - id: s1
@@ -15,7 +15,9 @@ systems:
       - id: n2
         name: "Outlet"
         kind:
-          type: Junction
+          type: Atmosphere
+          pressure_pa: 101325.0
+          temperature_k: 300.0
     components:
       - id: c1
         name: "Orifice"
@@ -29,9 +31,6 @@ systems:
     boundaries:
       - node_id: n1
         pressure_pa: 200000.0
-        temperature_k: 300.0
-      - node_id: n2
-        pressure_pa: 101325.0
         temperature_k: 300.0
     schedules: []
 modules: []

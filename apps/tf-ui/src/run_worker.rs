@@ -1,7 +1,8 @@
 use std::path::Path;
 use std::sync::mpsc::{Receiver, channel};
 use std::thread::{self, JoinHandle};
-use tf_app::{RunMode, RunOptions, RunRequest};
+use std::time::Instant;
+use tf_app::{RunMode, RunOptions, RunProgressEvent, RunRequest, RunTimingSummary};
 
 #[derive(Debug, Clone)]
 pub enum RunType {
@@ -16,13 +17,11 @@ pub struct RunWorker {
 
 #[derive(Debug, Clone)]
 pub enum WorkerMessage {
-    #[allow(dead_code)]
-    Progress {
-        step: usize,
-        total: usize,
-    },
+    Progress(RunProgressEvent),
     Complete {
         run_id: String,
+        loaded_from_cache: bool,
+        timing: RunTimingSummary,
     },
     Error {
         message: String,
@@ -80,12 +79,39 @@ impl RunWorker {
             },
         };
 
+        let mut last_emit = Instant::now();
+        let mut last_stage_key = String::new();
+        let mut last_fraction = -1.0f64;
+
         // Execute via tf-app
-        let response = tf_app::run_service::ensure_run(&request)?;
+        let response = tf_app::run_service::ensure_run_with_progress(
+            &request,
+            Some(&mut |event| {
+                let stage_key = format!("{:?}", event.stage);
+                let fraction = event
+                    .transient
+                    .as_ref()
+                    .map(|t| t.fraction_complete)
+                    .unwrap_or(-1.0);
+
+                let emit_now = stage_key != last_stage_key
+                    || (fraction >= 0.0 && (fraction - last_fraction).abs() >= 0.01)
+                    || last_emit.elapsed().as_millis() >= 100;
+
+                if emit_now {
+                    let _ = tx.send(WorkerMessage::Progress(event));
+                    last_emit = Instant::now();
+                    last_stage_key = stage_key;
+                    last_fraction = fraction;
+                }
+            }),
+        )?;
 
         // Notify completion
         tx.send(WorkerMessage::Complete {
             run_id: response.run_id,
+            loaded_from_cache: response.loaded_from_cache,
+            timing: response.timing,
         })?;
 
         Ok(())

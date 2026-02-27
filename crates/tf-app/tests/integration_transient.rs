@@ -147,4 +147,22 @@ fn transient_full_blowdown_transition() {
         p_initial,
         p_after_open
     );
+
+    let max_valve_h = records
+        .iter()
+        .filter(|record| record.time_s >= 2.0)
+        .filter_map(|record| {
+            record
+                .node_values
+                .iter()
+                .find(|node| node.node_id == "n_valve")
+                .and_then(|node| node.h_j_per_kg)
+        })
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    assert!(
+        max_valve_h.is_finite() && max_valve_h < 1.0e6,
+        "Valve junction enthalpy should remain bounded after opening (max_h={})",
+        max_valve_h
+    );
 }

@@ -1,14 +1,16 @@
 //! Run execution and caching service.
 
 use std::path::Path;
+use std::time::Instant;
 use tf_project::schema::SystemDef;
 use tf_results::{
     EdgeValueSnapshot, GlobalValueSnapshot, NodeValueSnapshot, RunManifest, RunStore,
     RunType as ResultsRunType, TimeseriesRecord,
 };
-use tf_solver::SteadyProblem;
+use tf_solver::{SolveProgressEvent, SteadyProblem};
 
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
+use crate::progress::{RunProgressEvent, RunStage, SteadyProgress, TransientProgress};
 use crate::project_service;
 use crate::runtime_compile::{self, BoundaryCondition, SystemRuntime};
 
@@ -43,19 +45,88 @@ pub struct RunRequest<'a> {
     pub options: RunOptions,
 }
 
+/// Concise timing and execution summary for a run.
+#[derive(Debug, Clone, Default)]
+pub struct RunTimingSummary {
+    pub compile_time_s: f64,
+    pub build_time_s: f64,
+    pub solve_time_s: f64,
+    pub save_time_s: f64,
+    pub load_cache_time_s: f64,
+    pub total_time_s: f64,
+    pub transient_steps: usize,
+    pub transient_cutback_retries: usize,
+    pub transient_fallback_uses: usize,
+    pub steady_iterations: usize,
+    pub steady_residual_norm: f64,
+}
+
 /// Response from a run execution.
 #[derive(Debug, Clone)]
 pub struct RunResponse {
     pub run_id: String,
     pub manifest: RunManifest,
     pub loaded_from_cache: bool,
+    pub timing: RunTimingSummary,
+}
+
+fn emit_progress(
+    progress_cb: &mut Option<&mut dyn FnMut(RunProgressEvent)>,
+    mode: RunMode,
+    stage: RunStage,
+    started: Instant,
+    message: Option<String>,
+    steady: Option<SteadyProgress>,
+    transient: Option<TransientProgress>,
+) {
+    if let Some(cb) = progress_cb.as_deref_mut() {
+        cb(RunProgressEvent {
+            mode,
+            stage,
+            elapsed_wall_s: started.elapsed().as_secs_f64(),
+            message,
+            steady,
+            transient,
+        });
+    }
 }
 
 /// Execute or load a run based on request.
 pub fn ensure_run(request: &RunRequest) -> AppResult<RunResponse> {
+    ensure_run_with_progress(request, None)
+}
+
+/// Execute or load a run and stream backend progress events.
+pub fn ensure_run_with_progress(
+    request: &RunRequest,
+    mut progress_cb: Option<&mut dyn FnMut(RunProgressEvent)>,
+) -> AppResult<RunResponse> {
+    let started = Instant::now();
+    let mut timing = RunTimingSummary::default();
+
+    emit_progress(
+        &mut progress_cb,
+        request.mode.clone(),
+        RunStage::LoadingProject,
+        started,
+        Some("Loading project".to_string()),
+        None,
+        None,
+    );
+
     // Load project
     let project = project_service::load_project(request.project_path)?;
     let system = project_service::get_system(&project, request.system_id)?;
+
+    emit_progress(
+        &mut progress_cb,
+        request.mode.clone(),
+        RunStage::CheckingCache,
+        started,
+        Some("Checking run cache".to_string()),
+        None,
+        None,
+    );
 
     // Compute run ID
     let result_run_type = match &request.mode {
@@ -74,19 +145,40 @@ pub fn ensure_run(request: &RunRequest) -> AppResult<RunResponse> {
         tf_results::compute_run_id(system, &result_run_type, &request.options.solver_version);
 
     // Initialize run store
-    let project_dir = request
-        .project_path
-        .parent()
-        .ok_or_else(|| AppError::InvalidInput("Invalid project path".to_string()))?;
-    let store = RunStore::new(project_dir.to_path_buf())?;
+    let store = RunStore::for_project(request.project_path)?;
 
     // Check cache
     if request.options.use_cache && store.has_run(&run_id) {
+        emit_progress(
+            &mut progress_cb,
+            request.mode.clone(),
+            RunStage::LoadingCachedResult,
+            started,
+            Some("Loading cached run".to_string()),
+            None,
+            None,
+        );
+
+        let load_started = Instant::now();
         let manifest = store.load_manifest(&run_id)?;
+        timing.load_cache_time_s = load_started.elapsed().as_secs_f64();
+        timing.total_time_s = started.elapsed().as_secs_f64();
+
+        emit_progress(
+            &mut progress_cb,
+            request.mode.clone(),
+            RunStage::Completed,
+            started,
+            Some("Loaded cached run".to_string()),
+            None,
+            None,
+        );
+
         return Ok(RunResponse {
             run_id,
             manifest,
             loaded_from_cache: true,
+            timing,
         });
     }
 
@@ -98,16 +190,33 @@ pub fn ensure_run(request: &RunRequest) -> AppResult<RunResponse> {
         &store,
         &run_id,
         &request.options.solver_version,
+        &mut progress_cb,
+        started,
+        &mut timing,
     )?;
+
+    timing.total_time_s = started.elapsed().as_secs_f64();
+
+    emit_progress(
+        &mut progress_cb,
+        request.mode.clone(),
+        RunStage::Completed,
+        started,
+        Some("Run completed".to_string()),
+        None,
+        None,
+    );
 
     Ok(RunResponse {
         run_id,
         manifest,
         loaded_from_cache: false,
+        timing,
     })
 }
 
 /// Execute a run (steady or transient).
+#[allow(clippy::too_many_arguments)]
 fn execute_run(
     system: &SystemDef,
     system_id: &str,
@@ -115,9 +224,21 @@ fn execute_run(
     store: &RunStore,
     run_id: &str,
     solver_version: &str,
+    progress_cb: &mut Option<&mut dyn FnMut(RunProgressEvent)>,
+    started: Instant,
+    timing: &mut RunTimingSummary,
 ) -> AppResult<RunManifest> {
     match mode {
-        RunMode::Steady => execute_steady(system, system_id, store, run_id, solver_version),
+        RunMode::Steady => execute_steady(
+            system,
+            system_id,
+            store,
+            run_id,
+            solver_version,
+            progress_cb,
+            started,
+            timing,
+        ),
         RunMode::Transient { dt_s, t_end_s } => execute_transient(
             system,
             system_id,
@@ -126,23 +247,58 @@ fn execute_run(
             *dt_s,
             *t_end_s,
             solver_version,
+            progress_cb,
+            started,
+            timing,
         ),
     }
 }
 
 /// Execute steady-state simulation.
+#[allow(clippy::too_many_arguments)]
 fn execute_steady(
     system: &SystemDef,
     system_id: &str,
     store: &RunStore,
     run_id: &str,
     solver_version: &str,
+    progress_cb: &mut Option<&mut dyn FnMut(RunProgressEvent)>,
+    started: Instant,
+    timing: &mut RunTimingSummary,
 ) -> AppResult<RunManifest> {
+    emit_progress(
+        progress_cb,
+        RunMode::Steady,
+        RunStage::CompilingRuntime,
+        started,
+        Some("Compiling runtime".to_string()),
+        None,
+        None,
+    );
+
     // Compile runtime
+    let compile_started = Instant::now();
     let runtime = runtime_compile::compile_system(system)?;
     let fluid_model = runtime_compile::build_fluid_model(&system.fluid)?;
-    let boundaries = runtime_compile::parse_boundaries(&system.boundaries, &runtime.node_id_map)?;
+    let boundaries = runtime_compile::parse_boundaries_with_atmosphere(
+        system,
+        &system.boundaries,
+        &runtime.node_id_map,
+    )?;
     let components = runtime_compile::build_components(system, &runtime.comp_id_map)?;
+    timing.compile_time_s = compile_started.elapsed().as_secs_f64();
+
+    emit_progress(
+        progress_cb,
+        RunMode::Steady,
+        RunStage::BuildingSteadyProblem,
+        started,
+        Some("Building steady problem".to_string()),
+        None,
+        None,
+    );
+
+    let build_started = Instant::now();
 
     // Build problem
     let mut problem = SteadyProblem::new(
@@ -170,8 +326,95 @@ fn execute_steady(
         }
     }
 
+    timing.build_time_s = build_started.elapsed().as_secs_f64();
+
+    emit_progress(
+        progress_cb,
+        RunMode::Steady,
+        RunStage::SolvingSteady,
+        started,
+        Some("Solving steady system".to_string()),
+        None,
+        None,
+    );
+
     // Solve
-    let solution = tf_solver::solve(&mut problem, None, None)?;
+    let solve_started = Instant::now();
+    let solution =
+        tf_solver::solve_with_progress(&mut problem, None, None, &mut |event| match event {
+            SolveProgressEvent::OuterIterationStarted {
+                outer_iteration,
+                max_outer_iterations,
+            } => emit_progress(
+                progress_cb,
+                RunMode::Steady,
+                RunStage::SolvingSteady,
+                started,
+                Some(format!(
+                    "Steady solve outer iteration {}/{}",
+                    outer_iteration, max_outer_iterations
+                )),
+                Some(SteadyProgress {
+                    outer_iteration: Some(outer_iteration),
+                    max_outer_iterations: Some(max_outer_iterations),
+                    ..Default::default()
+                }),
+                None,
+            ),
+            SolveProgressEvent::NewtonIteration {
+                outer_iteration,
+                iteration,
+                residual_norm,
+            } => emit_progress(
+                progress_cb,
+                RunMode::Steady,
+                RunStage::SolvingSteady,
+                started,
+                Some("Steady Newton iteration".to_string()),
+                Some(SteadyProgress {
+                    outer_iteration: Some(outer_iteration),
+                    iteration: Some(iteration),
+                    residual_norm: Some(residual_norm),
+                    ..Default::default()
+                }),
+                None,
+            ),
+            SolveProgressEvent::OuterIterationCompleted {
+                outer_iteration,
+                residual_norm,
+            } => emit_progress(
+                progress_cb,
+                RunMode::Steady,
+                RunStage::SolvingSteady,
+                started,
+                Some(format!("Outer iteration {} completed", outer_iteration)),
+                Some(SteadyProgress {
+                    outer_iteration: Some(outer_iteration),
+                    residual_norm: Some(residual_norm),
+                    ..Default::default()
+                }),
+                None,
+            ),
+            SolveProgressEvent::Converged {
+                total_iterations,
+                residual_norm,
+            } => emit_progress(
+                progress_cb,
+                RunMode::Steady,
+                RunStage::SolvingSteady,
+                started,
+                Some("Steady solve converged".to_string()),
+                Some(SteadyProgress {
+                    iteration: Some(total_iterations),
+                    residual_norm: Some(residual_norm),
+                    ..Default::default()
+                }),
+                None,
+            ),
+        })?;
+    timing.solve_time_s = solve_started.elapsed().as_secs_f64();
+    timing.steady_iterations = solution.iterations;
+    timing.steady_residual_norm = solution.residual_norm;
 
     // Convert to timeseries record
     let record = solution_to_timeseries(&solution, &runtime);
@@ -185,13 +428,26 @@ fn execute_steady(
         solver_version: solver_version.to_string(),
     };
 
+    emit_progress(
+        progress_cb,
+        RunMode::Steady,
+        RunStage::SavingResults,
+        started,
+        Some("Saving run output".to_string()),
+        None,
+        None,
+    );
+
     // Save
+    let save_started = Instant::now();
     store.save_run(&manifest, &[record])?;
+    timing.save_time_s = save_started.elapsed().as_secs_f64();
 
     Ok(manifest)
 }
 
 /// Execute transient simulation.
+#[allow(clippy::too_many_arguments)]
 fn execute_transient(
     system: &SystemDef,
     system_id: &str,
@@ -200,15 +456,47 @@ fn execute_transient(
     dt_s: f64,
     t_end_s: f64,
     solver_version: &str,
+    progress_cb: &mut Option<&mut dyn FnMut(RunProgressEvent)>,
+    started: Instant,
+    timing: &mut RunTimingSummary,
 ) -> AppResult<RunManifest> {
     use crate::transient_compile::TransientNetworkModel;
-    use tf_sim::SimOptions;
+    use tf_sim::{run_sim_with_progress, SimOptions};
+
+    emit_progress(
+        progress_cb,
+        RunMode::Transient { dt_s, t_end_s },
+        RunStage::CompilingRuntime,
+        started,
+        Some("Compiling runtime".to_string()),
+        None,
+        None,
+    );
 
     // Compile runtime
+    let compile_started = Instant::now();
     let runtime = runtime_compile::compile_system(system)?;
+    timing.compile_time_s = compile_started.elapsed().as_secs_f64();
 
     // Create transient model
     let mut model = TransientNetworkModel::new(system, &runtime)?;
+
+    emit_progress(
+        progress_cb,
+        RunMode::Transient { dt_s, t_end_s },
+        RunStage::RunningTransient,
+        started,
+        Some("Running transient simulation".to_string()),
+        None,
+        Some(TransientProgress {
+            sim_time_s: 0.0,
+            t_end_s,
+            fraction_complete: 0.0,
+            step: 0,
+            cutback_retries: 0,
+            fallback_uses: None,
+        }),
+    );
 
     // Run transient simulation
     let options = SimOptions {
@@ -217,9 +505,41 @@ fn execute_transient(
         max_steps: 100_000,
         record_every: 1,
         integrator: tf_sim::IntegratorType::RK4,
+        min_dt: (dt_s * 0.1).max(1.0e-6),
+        max_retries: 8,
+        cutback_factor: 0.5,
+        grow_factor: 1.5,
     };
 
-    let sim_record = tf_sim::run_sim(&mut model, &options)?;
+    let solve_started = Instant::now();
+    let sim_record = run_sim_with_progress(
+        &mut model,
+        &options,
+        Some(&mut |p| {
+            emit_progress(
+                progress_cb,
+                RunMode::Transient { dt_s, t_end_s },
+                RunStage::RunningTransient,
+                started,
+                Some(format!(
+                    "Step {} | t={:.4}/{:.4} s | retries={} ",
+                    p.step, p.sim_time, p.t_end, p.cutback_retries
+                )),
+                None,
+                Some(TransientProgress {
+                    sim_time_s: p.sim_time,
+                    t_end_s: p.t_end,
+                    fraction_complete: p.fraction_complete,
+                    step: p.step,
+                    cutback_retries: p.cutback_retries,
+                    fallback_uses: None,
+                }),
+            )
+        }),
+    )?;
+    timing.solve_time_s = solve_started.elapsed().as_secs_f64();
+    timing.transient_steps = sim_record.steps;
+    timing.transient_cutback_retries = sim_record.cutback_retries;
 
     // Convert simulation records to timeseries records for storage
     let mut timeseries_records = Vec::new();
@@ -227,6 +547,10 @@ fn execute_transient(
         let ts_record = model.build_timeseries_record(*time, state)?;
         timeseries_records.push(ts_record);
     }
+
+    timing.transient_fallback_uses = model.fallback_uses();
+
+    model.print_diagnostics();
 
     // Build manifest
     let manifest = RunManifest {
@@ -241,8 +565,27 @@ fn execute_transient(
         solver_version: solver_version.to_string(),
     };
 
+    emit_progress(
+        progress_cb,
+        RunMode::Transient { dt_s, t_end_s },
+        RunStage::SavingResults,
+        started,
+        Some("Saving run output".to_string()),
+        None,
+        Some(TransientProgress {
+            sim_time_s: t_end_s,
+            t_end_s,
+            fraction_complete: 1.0,
+            step: timing.transient_steps,
+            cutback_retries: timing.transient_cutback_retries,
+            fallback_uses: Some(timing.transient_fallback_uses),
+        }),
+    );
+
     // Save
+    let save_started = Instant::now();
     store.save_run(&manifest, &timeseries_records)?;
+    timing.save_time_s = save_started.elapsed().as_secs_f64();
 
     Ok(manifest)
 }
@@ -292,10 +635,7 @@ fn solution_to_timeseries(
 
 /// List runs for a system.
 pub fn list_runs(project_path: &Path, system_id: &str) -> AppResult<Vec<RunManifest>> {
-    let project_dir = project_path
-        .parent()
-        .ok_or_else(|| AppError::InvalidInput("Invalid project path".to_string()))?;
-    let store = RunStore::new(project_dir.to_path_buf())?;
+    let store = RunStore::for_project(project_path)?;
 
     let mut runs = store.list_runs(system_id)?;
     runs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp)); // Most recent first
@@ -307,10 +647,7 @@ pub fn load_run(
     project_path: &Path,
     run_id: &str,
 ) -> AppResult<(RunManifest, Vec<TimeseriesRecord>)> {
-    let project_dir = project_path
-        .parent()
-        .ok_or_else(|| AppError::InvalidInput("Invalid project path".to_string()))?;
-    let store = RunStore::new(project_dir.to_path_buf())?;
+    let store = RunStore::for_project(project_path)?;
 
     let manifest = store.load_manifest(run_id)?;
     let records = store.load_timeseries(run_id)?;

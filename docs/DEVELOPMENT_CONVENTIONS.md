@@ -37,6 +37,13 @@ This document formalizes coding standards and conventions for Thermoflow develop
 
 **Violation check**: Search the codebase for duplicated logic. If found, extract to a shared crate.
 
+### Progress and Timing Ownership
+
+- Run progress and timing are backend-owned and emitted from `tf-app`.
+- Frontends must consume `ensure_run_with_progress` events, not invent independent run-progress logic.
+- Steady UX should prefer stage + iteration/residual reporting over fake percent completion.
+- Transient UX should show real simulated-time progress (`sim_time / t_end`) and retry/cutback counts.
+
 ### Error Handling
 
 - Errors must be `thiserror`-based enums in library crates
@@ -82,6 +89,13 @@ Establish and document sign conventions for each domain:
 - **Temperature rise**: positive = heating (pump, combustor), negative = cooling (nozzle expansion)
 
 Document these in the crate's top-level module doc and in component constructors.
+
+## Node Kind Guidelines
+
+- **Junction**: Use for algebraic nodes with no storage (mixing/branching points).
+- **ControlVolume**: Use for finite storage with transient mass/energy state.
+- **Atmosphere**: Use for infinite-reservoir boundaries with fixed pressure/temperature.
+  Atmosphere is not a control volume and is not solved for enthalpy.
 
 ## Repository Organization
 
@@ -339,34 +353,7 @@ Before submitting code for review:
 - [ ] Commit messages are clear and follow conventions
 - [ ] No commented-out code or debug prints left behind
 
-## Known Limitations and Workarounds
-
-### Transient Startup at t=0
-
-**Issue**: Transient simulations may fail at t=0 with "Jacobian solve failed" error due to numerical singularity when the solver has no warm-start solution and relies on initial guess.
-
-**Root cause**: At the very first timestep, the system lacks a previous solution to use as warm-start. The initial pressure guess (uniform 101.325 Pa for free nodes) combined with high-pressure control volume boundaries can create an ill-conditioned Jacobian.
-
-**Workaround**: Start transient simulations from a small positive time instead of t=0:
-
-```bash
-# Instead of:
-cargo run -p tf-cli -- run transient project.yaml system-id --dt 0.01 --t-end 10.0
-
-# Use:
-cargo run -p tf-cli -- run transient project.yaml system-id --dt 0.01 --t-start 0.01 --t-end 10.0
-```
-
-Once t > 0, the solver has a warm-start solution and becomes well-conditioned.
-
-**Mitigation strategies** (for developers):
-- Component models include minimum conductance regularization (e.g., valve effective area floor of 1e-4 * max_area)
-- Newton solver uses adaptive line search to maintain feasibility
-- Both strategies provide robustness but do not eliminate the t=0 singularity issue
-
-Future work: Instrumenting the t=0 solver to diagnose the Jacobian singularity root cause.
-
 ---
 
-**Document version**: 1.0  
-**Last updated**: 2026-02-26
+**Document version**: 1.1  
+**Last updated**: 2026-02-27

@@ -3,7 +3,7 @@
 use crate::types::{RunManifest, TimeseriesRecord};
 use crate::{ResultsError, ResultsResult};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
 pub struct RunStore {
@@ -12,8 +12,21 @@ pub struct RunStore {
 
 impl RunStore {
     pub fn new(root_dir: PathBuf) -> ResultsResult<Self> {
-        fs::create_dir_all(&root_dir)?;
+        // Use a more resilient approach that handles Windows race conditions
+        if !root_dir.exists() {
+            fs::create_dir_all(&root_dir)?;
+        }
         Ok(Self { root_dir })
+    }
+
+    pub fn for_project(project_path: &Path) -> ResultsResult<Self> {
+        let project_dir = project_path
+            .parent()
+            .ok_or_else(|| ResultsError::InvalidPath {
+                message: "project path has no parent directory".to_string(),
+            })?;
+        let runs_dir = project_dir.join(".thermoflow").join("runs");
+        Self::new(runs_dir)
     }
 
     fn run_dir(&self, run_id: &str) -> PathBuf {

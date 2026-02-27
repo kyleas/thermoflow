@@ -1,4 +1,4 @@
-version: 1
+version: 2
 name: "Turbopump Demo Example"
 systems:
   - id: s1
@@ -19,7 +19,9 @@ systems:
       - id: n_exhaust
         name: "Exhaust"
         kind:
-          type: Junction
+          type: Atmosphere
+          pressure_pa: 110000.0
+          temperature_k: 300.0
     components:
       - id: p1
         name: "Main Pump"
@@ -45,9 +47,6 @@ systems:
     boundaries:
       - node_id: n_supply
         pressure_pa: 200000.0
-        temperature_k: 300.0
-      - node_id: n_exhaust
-        pressure_pa: 110000.0
         temperature_k: 300.0
     schedules: []
 modules: []

@@ -10,9 +10,14 @@ pub mod newton;
 pub mod problem;
 pub mod solve;
 pub mod steady;
+pub mod thermo_policy;
 
 pub use error::{SolverError, SolverResult};
 pub use newton::{NewtonConfig, NewtonResult};
 pub use problem::SteadyProblem;
-pub use solve::{solve, solve_with_active};
+pub use solve::{
+    SolveProgressEvent, solve, solve_with_active, solve_with_active_and_policy, solve_with_policy,
+    solve_with_progress,
+};
 pub use steady::SteadySolution;
+pub use thermo_policy::{StateCreationResult, StrictPolicy, ThermoStatePolicy};

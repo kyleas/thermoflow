@@ -1,9 +1,0 @@
-{
-  "run_id": "612e804453eb56569e18cadf5b00391c3b56cd3248b41182f8baf89dc0cd6fcc",
-  "system_id": "s1",
-  "timestamp": "2026-02-26T06:02:17.570611700+00:00",
-  "run_type": {
-    "type": "Steady"
-  },
-  "solver_version": "0.1.0"
-}

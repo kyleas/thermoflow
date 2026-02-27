@@ -21,6 +21,9 @@ pub enum ResultsError {
     #[error("Run not found: {run_id}")]
     RunNotFound { run_id: String },
 
+    #[error("Invalid path: {message}")]
+    InvalidPath { message: String },
+
     #[error("Invalid hash: {0}")]
     InvalidHash(String),
 }

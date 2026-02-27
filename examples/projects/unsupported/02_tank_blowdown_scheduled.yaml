@@ -1,0 +1,111 @@
+version: 2
+name: "Tank Blowdown Transient Example (UNSUPPORTED)"
+# NOTE: This example demonstrates timed valve opening/closing schedules,
+# which are NOT YET SUPPORTED due to numerical convergence challenges.
+# The continuation solver is not robust enough for these transients.
+# 
+# This example is kept for reference and future development.
+# For supported transient workflows, see 03_simple_vent_transient.yaml
+systems:
+  - id: s1
+    name: "Tank Blowdown"
+    fluid:
+      composition:
+        type: Pure
+        species: Nitrogen
+    nodes:
+      - id: n_tank
+        name: "Tank"
+        kind:
+          type: ControlVolume
+          volume_m3: 0.05
+          initial:
+            mode: PT
+            p_pa: 3500000.0
+            t_k: 300.0
+      - id: n_valve
+        name: "Valve Outlet"
+        kind:
+          type: Junction
+      - id: n_ambient
+        name: "Ambient"
+        kind:
+          type: Atmosphere
+          pressure_pa: 101325.0
+          temperature_k: 300.0
+    components:
+      - id: v1
+        name: "Blowdown Valve"
+        kind:
+          type: Valve
+          cd: 0.8
+          area_max_m2: 0.0002
+          position: 0.05
+          law:
+            type: Linear
+          treat_as_gas: true
+        from_node_id: n_tank
+        to_node_id: n_valve
+      - id: o1
+        name: "Orifice"
+        kind:
+          type: Orifice
+          cd: 0.8
+          area_m2: 0.00015
+          treat_as_gas: true
+        from_node_id: n_valve
+        to_node_id: n_ambient
+    boundaries: []
+    schedules:
+      - id: sch1
+        name: "Valve Schedule (UNSUPPORTED)"
+        events:
+          - time_s: 2.0
+            action:
+              type: SetValvePosition
+              component_id: v1
+              position: 0.15
+modules: []
+layouts:
+  - system_id: s1
+    nodes:
+      - node_id: n_tank
+        x: 200.0
+        y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+      - node_id: n_valve
+        x: 380.0
+        y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+      - node_id: n_ambient
+        x: 560.0
+        y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+    edges:
+      - component_id: v1
+        points:
+          - x: 200.0
+            y: 200.0
+          - x: 380.0
+            y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+      - component_id: o1
+        points:
+          - x: 380.0
+            y: 200.0
+          - x: 560.0
+            y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+    overlay:
+      show_pressure: true
+      show_temperature: true
+      show_enthalpy: false
+      show_density: false
+      show_mass_flow: true
+runs:
+  runs: []

@@ -78,6 +78,24 @@ impl Species {
             Species::RP1 => "RP-1",
         }
     }
+
+    /// Get molar mass [kg/kmol] for this species.
+    ///
+    /// Values sourced from standard reference data (e.g., NIST).
+    pub fn molar_mass(&self) -> f64 {
+        match self {
+            Species::O2 => 31.999,  // O₂
+            Species::CH4 => 16.043, // CH₄
+            Species::H2 => 2.016,   // H₂
+            Species::He => 4.003,   // He
+            Species::N2 => 28.014,  // N₂
+            Species::Ar => 39.948,  // Ar
+            Species::CO2 => 44.010, // CO₂
+            Species::CO => 28.010,  // CO
+            Species::H2O => 18.015, // H₂O
+            Species::RP1 => 170.0,  // Approximate for kerosene
+        }
+    }
 }
 
 #[cfg(test)]

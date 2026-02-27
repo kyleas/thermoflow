@@ -4,7 +4,7 @@ use tf_project::{load_yaml, save_yaml, validate_project};
 #[test]
 fn roundtrip_yaml_empty_project() {
     let project = Project {
-        version: 1,
+        version: 2,
         name: "Empty Project".to_string(),
         systems: vec![],
         modules: vec![],
@@ -41,8 +41,11 @@ fn roundtrip_yaml_simple_system() {
             },
             NodeDef {
                 id: "n2".to_string(),
-                name: "Sink".to_string(),
-                kind: NodeKind::Junction,
+                name: "Atmosphere".to_string(),
+                kind: NodeKind::Atmosphere {
+                    pressure_pa: 100_000.0,
+                    temperature_k: 300.0,
+                },
             },
         ],
         components: vec![ComponentDef {
@@ -56,25 +59,17 @@ fn roundtrip_yaml_simple_system() {
             from_node_id: "n1".to_string(),
             to_node_id: "n2".to_string(),
         }],
-        boundaries: vec![
-            BoundaryDef {
-                node_id: "n1".to_string(),
-                pressure_pa: Some(200_000.0),
-                temperature_k: Some(300.0),
-                enthalpy_j_per_kg: None,
-            },
-            BoundaryDef {
-                node_id: "n2".to_string(),
-                pressure_pa: Some(100_000.0),
-                temperature_k: Some(300.0),
-                enthalpy_j_per_kg: None,
-            },
-        ],
+        boundaries: vec![BoundaryDef {
+            node_id: "n1".to_string(),
+            pressure_pa: Some(200_000.0),
+            temperature_k: Some(300.0),
+            enthalpy_j_per_kg: None,
+        }],
         schedules: vec![],
     };
 
     let project = Project {
-        version: 1,
+        version: 2,
         name: "Test Project".to_string(),
         systems: vec![system],
         modules: vec![],
@@ -124,7 +119,7 @@ fn validation_fails_on_missing_node() {
     };
 
     let project = Project {
-        version: 1,
+        version: 2,
         name: "Test".to_string(),
         systems: vec![system],
         modules: vec![],

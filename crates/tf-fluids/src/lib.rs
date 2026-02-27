@@ -40,6 +40,7 @@ pub mod error;
 pub mod model;
 pub mod species;
 pub mod state;
+pub mod surrogate;
 
 // Re-exports for ergonomics
 pub use composition::Composition;
@@ -48,3 +49,4 @@ pub use error::{FluidError, FluidResult};
 pub use model::FluidModel;
 pub use species::Species;
 pub use state::{SpecEnthalpy, SpecEntropy, SpecHeatCapacity, StateInput, ThermoState};
+pub use surrogate::FrozenPropertySurrogate;

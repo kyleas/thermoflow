@@ -59,10 +59,39 @@ pub enum NodeKind {
         #[serde(default)]
         initial: InitialCvDef,
     },
+    Atmosphere {
+        pressure_pa: f64,
+        temperature_k: f64,
+    },
 }
 
+/// Control volume initial condition specification.
+///
+/// Supports explicit mode-based initialization (preferred) and backward-compatible
+/// optional-field syntax (for migration).
+///
+/// Explicit modes (preferred):
+/// ```yaml
+/// initial:
+///   mode: PT       # or PH, mT, mH
+///   p_pa: 3500000.0
+///   t_k: 300.0
+/// ```
+///
+/// Backward-compatible syntax (deprecated; requires validation):
+/// ```yaml
+/// initial:
+///   p_pa: 300000.0
+///   t_k: 300.0
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct InitialCvDef {
+    /// Explicit initialization mode. If present, only relevant fields for that mode are used.
+    /// If absent, the system will attempt to infer the mode from provided optional fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>, // "PT", "PH", "mT", "mH"
+
+    // Mode-specific parameters (all optional for backward compat)
     pub p_pa: Option<f64>,
     pub t_k: Option<f64>,
     pub h_j_per_kg: Option<f64>,

@@ -19,6 +19,17 @@ pub fn draw_node_symbol(
             let rect = Rect::from_center_size(center, size);
             painter.rect_stroke(rect, radius * 0.3, Stroke::new(2.0, color));
         }
+        NodeKind::Atmosphere { .. } => {
+            // Atmosphere as open circle with a cap line
+            painter.circle_stroke(center, radius * 0.8, Stroke::new(2.0, color));
+            painter.line_segment(
+                [
+                    center + Vec2::new(-radius * 0.6, -radius * 0.2),
+                    center + Vec2::new(radius * 0.6, -radius * 0.2),
+                ],
+                Stroke::new(2.0, color),
+            );
+        }
     }
 
     if is_boundary {

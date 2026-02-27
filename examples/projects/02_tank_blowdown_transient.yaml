@@ -1,5 +1,6 @@
-version: 1
-name: "Tank Blowdown Transient Example"
+version: 2
+name: "Tank Blowdown Transient (Fixed Valve)"
+# Simplified blowdown with fixed valve position (supported workflow)
 systems:
   - id: s1
     name: "Tank Blowdown"
@@ -14,9 +15,9 @@ systems:
           type: ControlVolume
           volume_m3: 0.05
           initial:
-            p_pa: 300000.0
+            mode: PT
+            p_pa: 3500000.0
             t_k: 300.0
-            m_kg: 2.0
       - id: n_valve
         name: "Valve Outlet"
         kind:
@@ -24,7 +25,9 @@ systems:
       - id: n_ambient
         name: "Ambient"
         kind:
-          type: Junction
+          type: Atmosphere
+          pressure_pa: 101325.0
+          temperature_k: 300.0
     components:
       - id: v1
         name: "Blowdown Valve"
@@ -32,7 +35,7 @@ systems:
           type: Valve
           cd: 0.8
           area_max_m2: 0.0002
-          position: 0.0
+          position: 0.1
           law:
             type: Linear
           treat_as_gas: true
@@ -47,19 +50,8 @@ systems:
           treat_as_gas: true
         from_node_id: n_valve
         to_node_id: n_ambient
-    boundaries:
-      - node_id: n_ambient
-        pressure_pa: 101325.0
-        temperature_k: 300.0
-    schedules:
-      - id: sch1
-        name: "Valve Schedule"
-        events:
-          - time_s: 2.0
-            action:
-              type: SetValvePosition
-              component_id: v1
-              position: 0.2
+    boundaries: []
+    schedules: []
 modules: []
 layouts:
   - system_id: s1

@@ -118,9 +118,15 @@ fn valve_position_sweep() {
     };
 
     let mdot_closed = valve_closed.mdot(&model, ports).unwrap().value;
+    // Valve has minimum conductance regularization (~1e-4 * area_max) to prevent solver singularities
+    // Closed valve should have negligible but non-zero flow
     assert!(
-        mdot_closed.abs() < 1e-9,
-        "Closed valve should have ~zero flow"
+        mdot_closed.abs() < 1e-3,
+        "Closed valve should have minimal flow due to regularization"
+    );
+    assert!(
+        mdot_closed.abs() > 1e-15,
+        "Closed valve should not be exactly zero (has regularization floor)"
     );
 }
 

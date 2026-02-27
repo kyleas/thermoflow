@@ -1,10 +1,12 @@
 use egui_plot::{Legend, Line, Plot, PlotPoints};
-use tf_results::RunStore;
+use tf_results::{RunStore, TimeseriesRecord};
 
 #[derive(Default)]
 pub struct PlotView {
     selected_node_ids: Vec<String>,
     selected_variable: PlotVariable,
+    cached_run_id: Option<String>,
+    cached_timeseries: Vec<TimeseriesRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -34,22 +36,28 @@ impl PlotView {
         let store = run_store.as_ref().unwrap();
         let run_id = selected_run_id.as_ref().unwrap();
 
-        // Load timeseries data
-        let timeseries = match store.load_timeseries(run_id) {
-            Ok(data) => data,
-            Err(e) => {
-                ui.colored_label(
-                    egui::Color32::RED,
-                    format!("Error loading timeseries: {}", e),
-                );
-                return;
+        if self.cached_run_id.as_ref() != Some(run_id) {
+            match store.load_timeseries(run_id) {
+                Ok(data) => {
+                    self.cached_timeseries = data;
+                    self.cached_run_id = Some(run_id.clone());
+                }
+                Err(e) => {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        format!("Error loading timeseries: {}", e),
+                    );
+                    return;
+                }
             }
-        };
+        }
 
-        if timeseries.is_empty() {
+        if self.cached_timeseries.is_empty() {
             ui.label("No data available in this run");
             return;
         }
+
+        let timeseries = &self.cached_timeseries;
 
         // Get available nodes
         let available_nodes: Vec<String> = if let Some(first_record) = timeseries.first() {
@@ -122,7 +130,7 @@ impl PlotView {
             for node_id in &self.selected_node_ids {
                 let mut points = Vec::new();
 
-                for record in &timeseries {
+                for record in timeseries {
                     if let Some(node_data) =
                         record.node_values.iter().find(|n| &n.node_id == node_id)
                     {

@@ -3,10 +3,14 @@
 use crate::error::{SolverError, SolverResult};
 use crate::problem::SteadyProblem;
 use nalgebra::DVector;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tf_components::PortStates;
 use tf_core::CompId;
 use tf_core::units::{Pressure, kgps};
-use tf_fluids::{SpecEnthalpy, StateInput};
+use tf_fluids::SpecEnthalpy;
+
+static WEAK_FLOW_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
+const WEAK_FLOW_LOG_LIMIT: usize = 20;
 
 /// Solution state for a steady-state network.
 #[derive(Clone, Debug)]
@@ -94,21 +98,24 @@ pub fn compute_residuals(
     x: &DVector<f64>,
     problem: &SteadyProblem,
     mass_flows: &[(CompId, f64)],
+    policy: &dyn crate::thermo_policy::ThermoStatePolicy,
+    prior_enthalpies: Option<&[SpecEnthalpy]>,
+    weak_flow_mdot: f64,
 ) -> SolverResult<DVector<f64>> {
     let (pressures, enthalpies) = unpack_solution(x, problem)?;
     let node_count = problem.graph.nodes().len();
 
-    // Compute states for all nodes
+    // Compute states for all nodes using thermo policy (with fallback support)
     let mut states = Vec::new();
     for i in 0..node_count {
-        let state = problem.fluid.state(
-            StateInput::PH {
-                p: pressures[i],
-                h: enthalpies[i],
-            },
-            problem.composition.clone(),
+        let state_result = policy.create_state(
+            pressures[i],
+            enthalpies[i],
+            &problem.composition,
+            problem.fluid,
+            i,
         )?;
-        states.push(state);
+        states.push(state_result.into_state());
     }
 
     // Initialize mass and energy accumulation per node
@@ -195,10 +202,31 @@ pub fn compute_residuals(
         }
 
         if is_h_free {
-            // Energy balance residual with regularization for numerical stability
-            // When mass_out is very small, add a small regularization term to avoid singular Jacobian
-            const MDOT_REG: f64 = 1e-3; // kg/s regularization (increased for stability)
-            let re = energy_in[i] - enthalpies[i] * (mass_out[i] + MDOT_REG);
+            let h_prior = prior_enthalpies
+                .and_then(|prior| prior.get(i).copied())
+                .unwrap_or(enthalpies[i]);
+
+            // Weak-flow regularization for energy balance at junctions.
+            // When outgoing flow is tiny, blend node enthalpy toward prior state
+            // to avoid ill-conditioned energy equations.
+            let mdot_reg = if weak_flow_mdot > 0.0 && mass_out[i] < weak_flow_mdot {
+                weak_flow_mdot - mass_out[i]
+            } else {
+                0.0
+            };
+
+            if mdot_reg > 0.0 && (enthalpies[i] - h_prior).abs() > 5.0e5 {
+                let log_count = WEAK_FLOW_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+                if log_count < WEAK_FLOW_LOG_LIMIT {
+                    eprintln!(
+                        "[REG] Node {} weak-flow regularization: mdot_out={:.4} kg/s, h={:.1} J/kg, h_prior={:.1} J/kg",
+                        i, mass_out[i], enthalpies[i], h_prior
+                    );
+                }
+            }
+
+            let re =
+                energy_in[i] - enthalpies[i] * mass_out[i] - (enthalpies[i] - h_prior) * mdot_reg;
             residuals[r_idx] = re;
             r_idx += 1;
         }
@@ -281,3 +309,44 @@ pub fn initial_guess(problem: &SteadyProblem) -> SolverResult<DVector<f64>> {
     Ok(pack_solution(&pressures, &enthalpies, problem))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tf_fluids::{Composition, CoolPropModel};
+    use tf_graph::GraphBuilder;
+
+    #[test]
+    fn weak_flow_regularization_anchors_enthalpy() {
+        let mut builder = GraphBuilder::new();
+        let node_id = builder.add_node("n0");
+        let graph = builder.build().expect("graph build");
+
+        let fluid = CoolPropModel::new();
+        let comp = Composition::pure(tf_fluids::Species::N2);
+
+        let mut problem = SteadyProblem::new(&graph, &fluid, comp);
+        problem
+            .set_pressure_bc(node_id, tf_core::units::pa(101325.0))
+            .unwrap();
+
+        let x = DVector::from_vec(vec![300000.0]);
+        let prior_enthalpies = vec![200000.0];
+
+        let residuals = compute_residuals(
+            &x,
+            &problem,
+            &[],
+            &crate::thermo_policy::StrictPolicy,
+            Some(&prior_enthalpies),
+            1.0e-3,
+        )
+        .expect("residuals");
+
+        assert_eq!(residuals.len(), 1);
+        let expected = -(300000.0 - 200000.0) * 1.0e-3;
+        assert!(
+            (residuals[0] - expected).abs() < 1e-6,
+            "unexpected residual"
+        );
+    }
+}

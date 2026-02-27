@@ -3,10 +3,20 @@
 use std::path::Path;
 use tf_app::{project_service, query, run_service, RunMode, RunOptions, RunRequest};
 
+fn clear_run_cache(project_path: &Path) {
+    if let Some(project_dir) = project_path.parent() {
+        let runs_dir = project_dir.join(".thermoflow").join("runs");
+        if runs_dir.exists() {
+            let _ = std::fs::remove_dir_all(&runs_dir);
+        }
+    }
+}
+
 #[test]
 fn test_steady_simulation_orifice() {
     // Path to example project
     let project_path = Path::new("../../examples/projects/01_orifice_steady.yaml");
+    clear_run_cache(project_path);
 
     // Verify project loads and validates
     let project = project_service::load_project(project_path).expect("Failed to load project");
@@ -100,6 +110,7 @@ fn test_steady_simulation_orifice() {
 #[test]
 fn test_steady_simulation_with_no_cache() {
     let project_path = Path::new("../../examples/projects/01_orifice_steady.yaml");
+    clear_run_cache(project_path);
 
     // First run with cache enabled
     let request = RunRequest {

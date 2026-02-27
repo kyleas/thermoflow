@@ -1,9 +1,11 @@
 //! tf-project: canonical project file format and validation.
 
+pub mod cv_init;
 pub mod migrate;
 pub mod schema;
 pub mod validate;
 
+pub use cv_init::CvInitMode;
 pub use migrate::{LATEST_VERSION, migrate_to_latest};
 pub use schema::*;
 pub use validate::{ValidationError, validate_project};

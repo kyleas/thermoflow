@@ -43,6 +43,8 @@ Thermoflow evolves in seven phases, each building on the previous to add capabil
 - Transient simulation unified through tf-app (moved from tf-ui)
 - Integration test suite for end-to-end flows
 - Architecture documentation
+- Explicit Atmosphere node for fixed-reservoir boundaries (improves venting/transient robustness)
+- Shared backend progress/timing API consumed by both CLI and GUI
 
 **Dependencies**: Phase 1 (core simulation works)
 

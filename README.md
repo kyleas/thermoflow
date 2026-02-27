@@ -72,6 +72,8 @@ thermoflow/
 
 - **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** — Core architecture, workspace model, design principles, and crate responsibilities
 - **[ROADMAP.md](docs/ROADMAP.md)** — Development phases, feature timeline, and dependencies
+- **[TRANSIENT_CAPABILITIES.md](docs/TRANSIENT_CAPABILITIES.md)** — Supported, unsupported, and experimental transient workflows
+- **[STABILIZATION_AUDIT.md](docs/STABILIZATION_AUDIT.md)** — Canonical paths, superseded paths, and current support matrix
 
 ## Workspace Model
 

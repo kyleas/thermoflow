@@ -5,14 +5,17 @@
 //! simulation execution, and result querying.
 
 pub mod error;
+pub mod progress;
 pub mod project_service;
 pub mod query;
 pub mod run_service;
 pub mod runtime_compile;
 pub mod transient_compile;
+pub mod transient_fallback_policy;
 
 // Re-export key types for convenience
 pub use error::{AppError, AppResult};
+pub use progress::{RunProgressEvent, RunStage, SteadyProgress, TransientProgress};
 pub use project_service::{
     get_system, list_systems, load_project, save_project, validate_project, SystemSummary,
 };
@@ -21,9 +24,10 @@ pub use query::{
     list_node_ids, RunSummary,
 };
 pub use run_service::{
-    ensure_run, list_runs, load_run, RunMode, RunOptions, RunRequest, RunResponse,
+    ensure_run, ensure_run_with_progress, list_runs, load_run, RunMode, RunOptions, RunRequest,
+    RunResponse, RunTimingSummary,
 };
 pub use runtime_compile::{
-    build_components, build_fluid_model, compile_system, parse_boundaries, BoundaryCondition,
-    SystemRuntime,
+    build_components, build_fluid_model, compile_system, parse_boundaries,
+    parse_boundaries_with_atmosphere, BoundaryCondition, SystemRuntime,
 };

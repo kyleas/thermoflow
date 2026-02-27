@@ -18,6 +18,7 @@ pub enum NodeKindChoice {
     #[default]
     Junction,
     ControlVolume,
+    Atmosphere,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -285,6 +286,7 @@ impl InspectView {
                 let mut kind_choice = match node.kind {
                     NodeKind::Junction => NodeKindChoice::Junction,
                     NodeKind::ControlVolume { .. } => NodeKindChoice::ControlVolume,
+                    NodeKind::Atmosphere { .. } => NodeKindChoice::Atmosphere,
                 };
 
                 let old_choice = kind_choice;
@@ -297,6 +299,11 @@ impl InspectView {
                             NodeKindChoice::ControlVolume,
                             "Control Volume",
                         );
+                        ui.selectable_value(
+                            &mut kind_choice,
+                            NodeKindChoice::Atmosphere,
+                            "Atmosphere",
+                        );
                     });
 
                 if kind_choice != old_choice {
@@ -306,7 +313,14 @@ impl InspectView {
                             volume_m3: 0.05,
                             initial: Default::default(),
                         },
+                        NodeKindChoice::Atmosphere => NodeKind::Atmosphere {
+                            pressure_pa: 101_325.0,
+                            temperature_k: 300.0,
+                        },
                     };
+                    if matches!(node.kind, NodeKind::Atmosphere { .. }) {
+                        boundaries.retain(|b| b.node_id != node.id);
+                    }
                     true
                 } else {
                     false
@@ -341,93 +355,125 @@ impl InspectView {
             changed |= edit_optional_value(ui, "Initial m (kg)", &mut initial.m_kg, 0.1, 0.0..=1e6);
         }
 
-        ui.separator();
-        ui.strong("Boundary Condition");
-
-        let bc_idx = boundaries.iter().position(|bc| bc.node_id == node.id);
-
-        if let Some(idx) = bc_idx {
-            let bc = &mut boundaries[idx];
+        if let NodeKind::Atmosphere {
+            pressure_pa,
+            temperature_k,
+        } = &mut node.kind
+        {
+            changed |= ui
+                .horizontal(|ui| {
+                    ui.label("Pressure (Pa):");
+                    ui.add(
+                        egui::DragValue::new(pressure_pa)
+                            .speed(1000.0)
+                            .range(0.0..=1e9),
+                    )
+                })
+                .inner
+                .changed();
 
             changed |= ui
                 .horizontal(|ui| {
-                    ui.label("Type:");
-                    let current_type =
-                        match (bc.pressure_pa, bc.temperature_k, bc.enthalpy_j_per_kg) {
-                            (Some(_), Some(_), _) => "P-T",
-                            (Some(_), None, Some(_)) => "P-H",
-                            _ => "Invalid",
-                        };
-
-                    egui::ComboBox::from_id_salt("bc_type")
-                        .selected_text(current_type)
-                        .show_ui(ui, |ui| {
-                            if ui.selectable_label(current_type == "P-T", "P-T").clicked() {
-                                bc.pressure_pa = Some(101325.0);
-                                bc.temperature_k = Some(300.0);
-                                bc.enthalpy_j_per_kg = None;
-                                return true;
-                            }
-                            if ui.selectable_label(current_type == "P-H", "P-H").clicked() {
-                                bc.pressure_pa = Some(101325.0);
-                                bc.temperature_k = None;
-                                bc.enthalpy_j_per_kg = Some(300000.0);
-                                return true;
-                            }
-                            false
-                        })
-                        .inner
-                        .unwrap_or(false)
-                })
-                .inner;
-
-            changed |= if let Some(ref mut p) = bc.pressure_pa {
-                ui.horizontal(|ui| {
-                    ui.label("Pressure (Pa):");
-                    ui.add(egui::DragValue::new(p).speed(1000.0).range(0.0..=1e9))
-                })
-                .inner
-                .changed()
-            } else {
-                false
-            };
-
-            changed |= if let Some(ref mut t) = bc.temperature_k {
-                ui.horizontal(|ui| {
                     ui.label("Temperature (K):");
-                    ui.add(egui::DragValue::new(t).speed(1.0).range(0.0..=1000.0))
+                    ui.add(
+                        egui::DragValue::new(temperature_k)
+                            .speed(1.0)
+                            .range(0.0..=2000.0),
+                    )
                 })
                 .inner
-                .changed()
-            } else {
-                false
-            };
+                .changed();
+        }
 
-            changed |= if let Some(ref mut h) = bc.enthalpy_j_per_kg {
-                ui.horizontal(|ui| {
-                    ui.label("Enthalpy (J/kg):");
-                    ui.add(egui::DragValue::new(h).speed(1000.0).range(-1e7..=1e7))
-                })
-                .inner
-                .changed()
-            } else {
-                false
-            };
+        if !matches!(node.kind, NodeKind::Atmosphere { .. }) {
+            ui.separator();
+            ui.strong("Boundary Condition");
 
-            if ui.button("Remove Boundary Condition").clicked() {
-                boundaries.remove(idx);
-                changed = true;
-            }
-        } else {
-            ui.label("No boundary condition set");
-            if ui.button("Add Boundary Condition").clicked() {
-                boundaries.push(BoundaryDef {
-                    node_id: node.id.clone(),
-                    pressure_pa: Some(101325.0),
-                    temperature_k: Some(300.0),
-                    enthalpy_j_per_kg: None,
-                });
-                changed = true;
+            let bc_idx = boundaries.iter().position(|bc| bc.node_id == node.id);
+
+            if let Some(idx) = bc_idx {
+                let bc = &mut boundaries[idx];
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Type:");
+                        let current_type =
+                            match (bc.pressure_pa, bc.temperature_k, bc.enthalpy_j_per_kg) {
+                                (Some(_), Some(_), _) => "P-T",
+                                (Some(_), None, Some(_)) => "P-H",
+                                _ => "Invalid",
+                            };
+
+                        egui::ComboBox::from_id_salt("bc_type")
+                            .selected_text(current_type)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(current_type == "P-T", "P-T").clicked() {
+                                    bc.pressure_pa = Some(101325.0);
+                                    bc.temperature_k = Some(300.0);
+                                    bc.enthalpy_j_per_kg = None;
+                                    return true;
+                                }
+                                if ui.selectable_label(current_type == "P-H", "P-H").clicked() {
+                                    bc.pressure_pa = Some(101325.0);
+                                    bc.temperature_k = None;
+                                    bc.enthalpy_j_per_kg = Some(300000.0);
+                                    return true;
+                                }
+                                false
+                            })
+                            .inner
+                            .unwrap_or(false)
+                    })
+                    .inner;
+
+                changed |= if let Some(ref mut p) = bc.pressure_pa {
+                    ui.horizontal(|ui| {
+                        ui.label("Pressure (Pa):");
+                        ui.add(egui::DragValue::new(p).speed(1000.0).range(0.0..=1e9))
+                    })
+                    .inner
+                    .changed()
+                } else {
+                    false
+                };
+
+                changed |= if let Some(ref mut t) = bc.temperature_k {
+                    ui.horizontal(|ui| {
+                        ui.label("Temperature (K):");
+                        ui.add(egui::DragValue::new(t).speed(1.0).range(0.0..=1000.0))
+                    })
+                    .inner
+                    .changed()
+                } else {
+                    false
+                };
+
+                changed |= if let Some(ref mut h) = bc.enthalpy_j_per_kg {
+                    ui.horizontal(|ui| {
+                        ui.label("Enthalpy (J/kg):");
+                        ui.add(egui::DragValue::new(h).speed(1000.0).range(-1e7..=1e7))
+                    })
+                    .inner
+                    .changed()
+                } else {
+                    false
+                };
+
+                if ui.button("Remove Boundary Condition").clicked() {
+                    boundaries.remove(idx);
+                    changed = true;
+                }
+            } else {
+                ui.label("No boundary condition set");
+                if ui.button("Add Boundary Condition").clicked() {
+                    boundaries.push(BoundaryDef {
+                        node_id: node.id.clone(),
+                        pressure_pa: Some(101325.0),
+                        temperature_k: Some(300.0),
+                        enthalpy_j_per_kg: None,
+                    });
+                    changed = true;
+                }
             }
         }
 
@@ -761,6 +807,7 @@ impl NodeKindChoice {
         match self {
             NodeKindChoice::Junction => "Junction",
             NodeKindChoice::ControlVolume => "Control Volume",
+            NodeKindChoice::Atmosphere => "Atmosphere",
         }
     }
 }

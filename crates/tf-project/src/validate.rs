@@ -1,7 +1,7 @@
 //! Project validation logic.
 
 use crate::schema::{BoundaryDef, ComponentDef, NodeDef, Project, SystemDef};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ValidationError {
@@ -17,6 +17,9 @@ pub enum ValidationError {
         value: String,
         reason: String,
     },
+
+    #[error("Unsupported feature: {feature} - {reason}")]
+    Unsupported { feature: String, reason: String },
 
     #[error("Unsupported version: {version}")]
     UnsupportedVersion { version: u32 },
@@ -86,6 +89,7 @@ pub fn validate_project(project: &Project) -> Result<(), ValidationError> {
 
 fn validate_system(system: &SystemDef) -> Result<(), ValidationError> {
     let mut node_ids = HashSet::new();
+    let mut node_kind_map = HashMap::new();
     for node in &system.nodes {
         if !node_ids.insert(&node.id) {
             return Err(ValidationError::DuplicateId {
@@ -94,6 +98,7 @@ fn validate_system(system: &SystemDef) -> Result<(), ValidationError> {
             });
         }
         validate_node(node)?;
+        node_kind_map.insert(&node.id, &node.kind);
     }
 
     let mut component_ids = HashSet::new();
@@ -109,6 +114,49 @@ fn validate_system(system: &SystemDef) -> Result<(), ValidationError> {
 
     for boundary in &system.boundaries {
         validate_boundary(boundary, &node_ids, &system.name)?;
+        if matches!(
+            node_kind_map.get(&boundary.node_id),
+            Some(crate::schema::NodeKind::Atmosphere { .. })
+        ) {
+            return Err(ValidationError::InvalidValue {
+                field: format!("boundary node_id '{}'", boundary.node_id),
+                value: boundary.node_id.clone(),
+                reason: "atmosphere nodes must not have separate boundaries".to_string(),
+            });
+        }
+    }
+
+    for schedule in &system.schedules {
+        for event in &schedule.events {
+            match &event.action {
+                crate::schema::ActionDef::SetValvePosition { component_id, .. } => {
+                    // Timed valve schedules are not supported yet
+                    return Err(ValidationError::Unsupported {
+                        feature: format!(
+                            "Timed valve position schedules (schedule '{}', component '{}')",
+                            schedule.name, component_id
+                        ),
+                        reason: "Timed valve opening/closing schedules are not yet supported. \
+                                 The continuation solver is not robust enough for valve transients. \
+                                 Use fixed valve positions for now.".to_string(),
+                    });
+                }
+                crate::schema::ActionDef::SetBoundaryPressure { node_id, .. }
+                | crate::schema::ActionDef::SetBoundaryTemperature { node_id, .. } => {
+                    if matches!(
+                        node_kind_map.get(node_id),
+                        Some(crate::schema::NodeKind::Atmosphere { .. })
+                    ) {
+                        return Err(ValidationError::InvalidValue {
+                            field: format!("schedule '{}' boundary node_id", schedule.name),
+                            value: node_id.clone(),
+                            reason: "atmosphere nodes have fixed state and cannot be scheduled"
+                                .to_string(),
+                        });
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
@@ -158,6 +206,26 @@ fn validate_node(node: &NodeDef) -> Result<(), ValidationError> {
                 });
             }
 
+            Ok(())
+        }
+        NodeKind::Atmosphere {
+            pressure_pa,
+            temperature_k,
+        } => {
+            if !pressure_pa.is_finite() || *pressure_pa <= 0.0 {
+                return Err(ValidationError::InvalidValue {
+                    field: format!("node '{}' pressure_pa", node.name),
+                    value: pressure_pa.to_string(),
+                    reason: "must be positive and finite".to_string(),
+                });
+            }
+            if !temperature_k.is_finite() || *temperature_k <= 0.0 {
+                return Err(ValidationError::InvalidValue {
+                    field: format!("node '{}' temperature_k", node.name),
+                    value: temperature_k.to_string(),
+                    reason: "must be positive and finite".to_string(),
+                });
+            }
             Ok(())
         }
     }

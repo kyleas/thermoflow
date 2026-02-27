@@ -6,6 +6,7 @@ use crate::views::{
 };
 use egui_file_dialog::{DialogMode, FileDialog};
 use std::path::PathBuf;
+use tf_app::RunProgressEvent;
 use tf_project::schema::{
     ComponentDef, ComponentKind, CompositionDef, FluidDef, InitialCvDef, LayoutDef, NodeDef,
     NodeKind, OverlaySettingsDef, Project, RunLibraryDef, SystemDef, ValveLawDef,
@@ -33,6 +34,7 @@ pub struct ThermoflowApp {
     run_worker: Option<RunWorker>,
     use_cached: bool,
     last_worker_message: Option<String>,
+    latest_progress: Option<RunProgressEvent>,
     system_runtime: Option<SystemRuntime>,
     transient_dt_s: f64,
     transient_t_end_s: f64,
@@ -76,6 +78,7 @@ impl ThermoflowApp {
             run_worker: None,
             use_cached: false,
             last_worker_message: None,
+            latest_progress: None,
             system_runtime: None,
             transient_dt_s: 0.01,
             transient_t_end_s: 1.0,
@@ -84,20 +87,12 @@ impl ThermoflowApp {
 
     fn init_run_store(&mut self) {
         // Create run store in project directory if saved, otherwise use temp directory
-        let runs_dir = if let Some(ref path) = self.project_path {
-            if let Some(parent) = path.parent() {
-                parent.join(".thermoflow").join("runs")
-            } else {
-                std::env::temp_dir().join("thermoflow-runs")
-            }
+        let store = if let Some(ref path) = self.project_path {
+            RunStore::for_project(path).ok()
         } else {
-            // For unsaved projects, use temp directory
-            std::env::temp_dir().join("thermoflow-runs")
+            RunStore::new(std::env::temp_dir().join("thermoflow-runs")).ok()
         };
-
-        if let Ok(store) = RunStore::new(runs_dir) {
-            self.run_store = Some(store);
-        }
+        self.run_store = store;
     }
 
     fn new_project(&mut self) {
@@ -191,17 +186,35 @@ impl ThermoflowApp {
         if let Some(worker) = &self.run_worker {
             while let Ok(msg) = worker.progress_rx.try_recv() {
                 match msg {
-                    WorkerMessage::Progress { step, total } => {
-                        self.last_worker_message =
-                            Some(format!("Run progress: {}/{}", step, total));
+                    WorkerMessage::Progress(event) => {
+                        self.latest_progress = Some(event.clone());
+                        self.last_worker_message = event.message;
                     }
-                    WorkerMessage::Complete { run_id } => {
-                        self.last_worker_message = Some(format!("Run completed: {}", run_id));
+                    WorkerMessage::Complete {
+                        run_id,
+                        loaded_from_cache,
+                        timing,
+                    } => {
+                        self.latest_progress = None;
+                        self.last_worker_message = Some(format!(
+                            "Run {}: {} | total {:.3}s (compile {:.3}s, solve {:.3}s, save {:.3}s)",
+                            if loaded_from_cache {
+                                "loaded from cache"
+                            } else {
+                                "completed"
+                            },
+                            run_id,
+                            timing.total_time_s,
+                            timing.compile_time_s,
+                            timing.solve_time_s,
+                            timing.save_time_s
+                        ));
                         run_id_result = Some(run_id);
                         completed = true;
                         break;
                     }
                     WorkerMessage::Error { message } => {
+                        self.latest_progress = None;
                         error_msg = Some(message);
                         completed = true;
                         break;
@@ -244,6 +257,8 @@ impl ThermoflowApp {
         };
 
         let worker = RunWorker::start(run_type, project_path, system_id, self.use_cached);
+        self.latest_progress = None;
+        self.last_worker_message = Some("Run started".to_string());
         self.run_worker = Some(worker);
     }
 
@@ -561,6 +576,10 @@ impl ThermoflowApp {
                 volume_m3: 0.05,
                 initial: InitialCvDef::default(),
             },
+            NodeKindChoice::Atmosphere => NodeKind::Atmosphere {
+                pressure_pa: 101_325.0,
+                temperature_k: 300.0,
+            },
         }
     }
 
@@ -803,9 +822,52 @@ impl eframe::App for ThermoflowApp {
                 }
             }
 
-            if let Some(message) = &self.last_worker_message {
+            if self.run_worker.is_some() || self.last_worker_message.is_some() {
                 ui.separator();
-                ui.label(message);
+                ui.group(|ui| {
+                    ui.heading("Run Status");
+
+                    if let Some(progress) = &self.latest_progress {
+                        ui.label(format!("Stage: {:?}", progress.stage));
+                        ui.label(format!("Elapsed: {:.2}s", progress.elapsed_wall_s));
+
+                        if let Some(t) = &progress.transient {
+                            ui.add(
+                                egui::ProgressBar::new(t.fraction_complete as f32)
+                                    .show_percentage()
+                                    .text(format!(
+                                        "t={:.3}/{:.3}s | step {} | cutbacks {}",
+                                        t.sim_time_s, t.t_end_s, t.step, t.cutback_retries
+                                    )),
+                            );
+                        }
+
+                        if let Some(s) = &progress.steady {
+                            let mut details = Vec::new();
+                            if let Some(outer) = s.outer_iteration {
+                                details.push(format!("outer {}", outer));
+                            }
+                            if let Some(iter) = s.iteration {
+                                details.push(format!("iter {}", iter));
+                            }
+                            if let Some(res) = s.residual_norm {
+                                details.push(format!("residual {:.3e}", res));
+                            }
+                            if !details.is_empty() {
+                                ui.label(details.join(" | "));
+                            }
+                            ui.add(
+                                egui::ProgressBar::new(0.0)
+                                    .animate(true)
+                                    .text("Solving steady system"),
+                            );
+                        }
+                    }
+
+                    if let Some(message) = &self.last_worker_message {
+                        ui.label(message);
+                    }
+                });
             }
         });
     }

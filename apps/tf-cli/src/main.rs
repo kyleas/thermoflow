@@ -1,6 +1,11 @@
 use clap::{Parser, Subcommand};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use tf_app::{AppResult, RunMode, RunOptions, RunRequest, project_service, query, run_service};
+use std::time::Instant;
+use tf_app::{
+    AppResult, RunMode, RunOptions, RunProgressEvent, RunRequest, RunStage, project_service, query,
+    run_service,
+};
 
 #[derive(Parser)]
 #[command(name = "tf-cli")]
@@ -171,13 +176,29 @@ fn cmd_run_steady(project_path: &Path, system_id: &str, use_cache: bool) -> AppR
         },
     };
 
-    let response = run_service::ensure_run(&request)?;
+    let mut last_emit = Instant::now();
+    let mut last_stage = String::new();
+    let response = run_service::ensure_run_with_progress(
+        &request,
+        Some(&mut |event| {
+            let stage_key = format!("{:?}", event.stage);
+            let emit_now = stage_key != last_stage || last_emit.elapsed().as_millis() >= 100;
+            if emit_now {
+                render_cli_progress(&event);
+                last_stage = stage_key;
+                last_emit = Instant::now();
+            }
+        }),
+    )?;
+    println!();
 
     if response.loaded_from_cache {
         println!("✓ Loaded from cache: {}", response.run_id);
     } else {
         println!("✓ Simulation completed: {}", response.run_id);
     }
+
+    print_timing_summary(&request.mode, &response.timing);
 
     // Load results and show brief summary
     let (_manifest, records) = run_service::load_run(project_path, &response.run_id)?;
@@ -212,13 +233,36 @@ fn cmd_run_transient(
         },
     };
 
-    let response = run_service::ensure_run(&request)?;
+    let mut last_emit = Instant::now();
+    let mut last_fraction = -1.0f64;
+    let response = run_service::ensure_run_with_progress(
+        &request,
+        Some(&mut |event| {
+            let fraction = event
+                .transient
+                .as_ref()
+                .map(|t| t.fraction_complete)
+                .unwrap_or(-1.0);
+            let emit_now = (fraction >= 0.0 && (fraction - last_fraction).abs() >= 0.005)
+                || last_emit.elapsed().as_millis() >= 100;
+            if emit_now {
+                render_cli_progress(&event);
+                if fraction >= 0.0 {
+                    last_fraction = fraction;
+                }
+                last_emit = Instant::now();
+            }
+        }),
+    )?;
+    println!();
 
     if response.loaded_from_cache {
         println!("✓ Loaded from cache: {}", response.run_id);
     } else {
         println!("✓ Simulation completed: {}", response.run_id);
     }
+
+    print_timing_summary(&request.mode, &response.timing);
 
     // Load results and show brief summary
     let (_manifest, records) = run_service::load_run(project_path, &response.run_id)?;
@@ -228,6 +272,82 @@ fn cmd_run_transient(
     println!("  Components: {}", summary.component_count);
 
     Ok(())
+}
+
+fn render_cli_progress(event: &RunProgressEvent) {
+    match event.stage {
+        RunStage::RunningTransient => {
+            if let Some(t) = &event.transient {
+                let width = 28usize;
+                let filled = ((t.fraction_complete * width as f64).round() as usize).min(width);
+                let bar = format!(
+                    "{}{}",
+                    "#".repeat(filled),
+                    "-".repeat(width.saturating_sub(filled))
+                );
+                print!(
+                    "\r[{}] {:>6.2}%  t={:.3}/{:.3}s  step={}  cutbacks={}  elapsed={:.1}s",
+                    bar,
+                    t.fraction_complete * 100.0,
+                    t.sim_time_s,
+                    t.t_end_s,
+                    t.step,
+                    t.cutback_retries,
+                    event.elapsed_wall_s
+                );
+                let _ = io::stdout().flush();
+            }
+        }
+        _ => {
+            let spinner = ['|', '/', '-', '\\'];
+            let spin_idx = ((event.elapsed_wall_s * 10.0) as usize) % spinner.len();
+            let mut line = format!(
+                "\r{} {:?}  elapsed={:.2}s",
+                spinner[spin_idx], event.stage, event.elapsed_wall_s
+            );
+            if let Some(s) = &event.steady {
+                if let Some(iter) = s.iteration {
+                    line.push_str(&format!("  iter={}", iter));
+                }
+                if let Some(residual) = s.residual_norm {
+                    line.push_str(&format!("  residual={:.3e}", residual));
+                }
+            }
+            if let Some(msg) = &event.message {
+                line.push_str(&format!("  {}", msg));
+            }
+            print!("{}", line);
+            let _ = io::stdout().flush();
+        }
+    }
+}
+
+fn print_timing_summary(mode: &RunMode, timing: &tf_app::RunTimingSummary) {
+    println!("\nTiming summary:");
+    println!("  Compile: {:.3}s", timing.compile_time_s);
+    if timing.build_time_s > 0.0 {
+        println!("  Build:   {:.3}s", timing.build_time_s);
+    }
+    println!("  Solve:   {:.3}s", timing.solve_time_s);
+    println!("  Save:    {:.3}s", timing.save_time_s);
+    if timing.load_cache_time_s > 0.0 {
+        println!("  Cache load: {:.3}s", timing.load_cache_time_s);
+    }
+    println!("  Total:   {:.3}s", timing.total_time_s);
+
+    match mode {
+        RunMode::Steady => {
+            println!("  Steady iterations: {}", timing.steady_iterations);
+            if timing.steady_residual_norm > 0.0 {
+                println!("  Final residual: {:.3e}", timing.steady_residual_norm);
+            }
+        }
+        RunMode::Transient { .. } => {
+            println!("  Transient steps: {}", timing.transient_steps);
+            println!("  Cutback retries: {}", timing.transient_cutback_retries);
+            println!("  Fallback uses:   {}", timing.transient_fallback_uses);
+        }
+    }
 }
 
 fn cmd_runs(project_path: &Path, system_id: &str) -> AppResult<()> {

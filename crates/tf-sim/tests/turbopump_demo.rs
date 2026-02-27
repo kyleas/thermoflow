@@ -346,6 +346,10 @@ fn turbopump_coupled_dynamics() {
         max_steps: 10_000,
         record_every: 5,
         integrator: IntegratorType::ForwardEuler,
+        min_dt: 1e-6,
+        max_retries: 2,
+        cutback_factor: 0.5,
+        grow_factor: 2.0,
     };
 
     let record = run_sim(&mut model, &opts).expect("Simulation failed");
