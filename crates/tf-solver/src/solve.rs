@@ -5,10 +5,12 @@ use crate::initialization::InitializationStrategy;
 use crate::jacobian::finite_difference_jacobian;
 use crate::newton::{NewtonConfig, newton_solve_with_validator};
 use crate::problem::SteadyProblem;
-use crate::steady::{SteadySolution, compute_residuals, initial_guess};
+use crate::steady::{SolverTimingStats, SteadySolution, compute_residuals, initial_guess};
 use crate::thermo_policy::{StrictPolicy, ThermoStatePolicy};
 use nalgebra::DVector;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 use tf_core::CompId;
 
 #[derive(Debug, Clone)]
@@ -225,6 +227,9 @@ fn solve_internal(
     if problem.num_free_vars() == 0 {
         // All nodes have boundary conditions - no unknowns to solve for.
         // Extract pressures and enthalpies from BCs, then compute mass flows directly.
+        // Phase 0: Instrument this direct path since transient uses it exclusively
+        let thermo_start = std::time::Instant::now();
+        
         let node_count = problem.graph.nodes().len();
         let mut pressures = Vec::with_capacity(node_count);
         let mut enthalpies = Vec::with_capacity(node_count);
@@ -254,8 +259,10 @@ fn solve_internal(
                 })?;
             node_states.push(state);
         }
+        let thermo_time_s = thermo_start.elapsed().as_secs_f64();
 
         // Compute mass flows from component equations
+        let mdot_start = std::time::Instant::now();
         let mut mass_flows = Vec::new();
         for comp_info in problem.graph.components() {
             let comp_id = comp_info.id;
@@ -295,6 +302,19 @@ fn solve_internal(
             let mdot = component.mdot(problem.fluid, ports)?;
             mass_flows.push((comp_id, mdot.value));
         }
+        let mdot_time_s = mdot_start.elapsed().as_secs_f64();
+
+        // Phase 0: Return timing for direct path (no residual/jacobian/linesearch on this path)
+        let timing_stats = crate::steady::SolverTimingStats {
+            thermo_createstate_time_s: thermo_time_s,
+            // For direct path, "residual" time represents mass flow computation
+            residual_eval_time_s: mdot_time_s,
+            jacobian_eval_time_s: 0.0,
+            linearch_time_s: 0.0,
+            residual_eval_count: 1, // One "evaluation" = one direct solve
+            jacobian_eval_count: 0,
+            linearch_iter_count: 0,
+        };
 
         return Ok(SteadySolution {
             pressures,
@@ -302,6 +322,7 @@ fn solve_internal(
             mass_flows,
             residual_norm: 0.0,
             iterations: 0,
+            timing_stats,
         });
     }
 
@@ -360,6 +381,15 @@ fn solve_internal(
     }
     let mut prev_mdots: Vec<f64> = mass_flows.iter().map(|(_, m)| *m).collect();
 
+    // Phase 0: Initialize instrumentation counters and timers
+    let residual_eval_count = std::sync::Arc::new(AtomicUsize::new(0));
+    let jacobian_eval_count = std::sync::Arc::new(AtomicUsize::new(0));
+    let linearch_iter_count = std::sync::Arc::new(AtomicUsize::new(0));
+    let residual_time_ns = std::sync::Arc::new(AtomicUsize::new(0));
+    let jacobian_time_ns = std::sync::Arc::new(AtomicUsize::new(0));
+    let linearch_time_ns = std::sync::Arc::new(AtomicUsize::new(0));
+    let thermo_createstate_time_ns = std::sync::Arc::new(AtomicUsize::new(0));
+
     if cfg.enthalpy_total_abs.is_finite() || cfg.enthalpy_total_rel.is_finite() {
         let node_flow = compute_node_flow_magnitudes(problem, &mass_flows);
         let mut clamp_hits = 0usize;
@@ -402,19 +432,41 @@ fn solve_internal(
         }
 
         // Solve for node states with current mass flows
+        // Phase 0: Wrap residual and jacobian with timing instrumentation
+        let residual_eval_count_clone = residual_eval_count.clone();
+        let residual_time_ns_clone = residual_time_ns.clone();
+        let thermo_createstate_time_ns_clone = thermo_createstate_time_ns.clone();
         let residual_fn = |x: &DVector<f64>| -> SolverResult<DVector<f64>> {
-            compute_residuals(
+            let start = Instant::now();
+            let thermo_start = Instant::now();
+            let result = compute_residuals(
                 x,
                 problem,
                 &mass_flows,
                 policy,
                 Some(&prior_enthalpies),
                 cfg.weak_flow_mdot,
-            )
+            );
+            let thermo_elapsed = thermo_start.elapsed();
+            let elapsed = start.elapsed();
+
+            residual_eval_count_clone.fetch_add(1, Ordering::Relaxed);
+            residual_time_ns_clone.fetch_add(elapsed.as_nanos() as usize, Ordering::Relaxed);
+            thermo_createstate_time_ns_clone
+                .fetch_add(thermo_elapsed.as_nanos() as usize, Ordering::Relaxed);
+            result
         };
 
+        let jacobian_eval_count_clone = jacobian_eval_count.clone();
+        let jacobian_time_ns_clone = jacobian_time_ns.clone();
         let jacobian_fn = |x: &DVector<f64>| -> SolverResult<nalgebra::DMatrix<f64>> {
-            finite_difference_jacobian(x, residual_fn, 1e-7)
+            let start = Instant::now();
+            let result = finite_difference_jacobian(x, residual_fn, 1e-7);
+            let elapsed = start.elapsed();
+
+            jacobian_eval_count_clone.fetch_add(1, Ordering::Relaxed);
+            jacobian_time_ns_clone.fetch_add(elapsed.as_nanos() as usize, Ordering::Relaxed);
+            result
         };
 
         // Fluid state validator: reject trial states that produce invalid P,h combinations
@@ -629,12 +681,25 @@ fn solve_internal(
                 });
             }
             // Already have converged solution - return it
+            // Phase 0: Include fine-grained timing statistics
+            let timing_stats = SolverTimingStats {
+                residual_eval_time_s: residual_time_ns.load(Ordering::Relaxed) as f64 / 1e9,
+                jacobian_eval_time_s: jacobian_time_ns.load(Ordering::Relaxed) as f64 / 1e9,
+                linearch_time_s: linearch_time_ns.load(Ordering::Relaxed) as f64 / 1e9,
+                thermo_createstate_time_s: thermo_createstate_time_ns.load(Ordering::Relaxed)
+                    as f64
+                    / 1e9,
+                residual_eval_count: residual_eval_count.load(Ordering::Relaxed),
+                jacobian_eval_count: jacobian_eval_count.load(Ordering::Relaxed),
+                linearch_iter_count: linearch_iter_count.load(Ordering::Relaxed),
+            };
             return Ok(SteadySolution {
                 pressures,
                 enthalpies,
                 mass_flows,
                 residual_norm: result.residual_norm,
                 iterations: total_iterations,
+                timing_stats,
             });
         }
 

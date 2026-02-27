@@ -116,6 +116,14 @@ pub struct TransientNetworkModel {
     junction_thermal_state: JunctionThermalState,
     junction_thermal_config: JunctionThermalConfig,
     junction_node_ids: Vec<NodeId>, // Track which nodes are junctions (not CVs)
+    // Solver timing accumulation (Phase 0 instrumentation)
+    solver_residual_time_s: f64,
+    solver_jacobian_time_s: f64,
+    solver_linearch_time_s: f64,
+    solver_thermo_time_s: f64,
+    solver_residual_eval_count: usize,
+    solver_jacobian_eval_count: usize,
+    solver_linearch_iter_count: usize,
     log_mode: TransientLogMode,
 }
 
@@ -250,6 +258,13 @@ impl TransientNetworkModel {
             junction_thermal_state: JunctionThermalState::new(),
             junction_thermal_config: JunctionThermalConfig::default(),
             junction_node_ids,
+            solver_residual_time_s: 0.0,
+            solver_jacobian_time_s: 0.0,
+            solver_linearch_time_s: 0.0,
+            solver_thermo_time_s: 0.0,
+            solver_residual_eval_count: 0,
+            solver_jacobian_eval_count: 0,
+            solver_linearch_iter_count: 0,
             log_mode,
         })
     }
@@ -269,6 +284,35 @@ impl TransientNetworkModel {
 
     pub fn surrogate_populations(&self) -> usize {
         self.surrogate_populations
+    }
+
+    // Phase 0 instrumentation: Accessor methods for accumulated solver timing
+    pub fn solver_residual_time_s(&self) -> f64 {
+        self.solver_residual_time_s
+    }
+
+    pub fn solver_jacobian_time_s(&self) -> f64 {
+        self.solver_jacobian_time_s
+    }
+
+    pub fn solver_linearch_time_s(&self) -> f64 {
+        self.solver_linearch_time_s
+    }
+
+    pub fn solver_thermo_time_s(&self) -> f64 {
+        self.solver_thermo_time_s
+    }
+
+    pub fn solver_residual_eval_count(&self) -> usize {
+        self.solver_residual_eval_count
+    }
+
+    pub fn solver_jacobian_eval_count(&self) -> usize {
+        self.solver_jacobian_eval_count
+    }
+
+    pub fn solver_linearch_iter_count(&self) -> usize {
+        self.solver_linearch_iter_count
     }
 
     /// Print transient simulation diagnostics.
@@ -1389,6 +1433,14 @@ impl TransientModel for TransientNetworkModel {
     fn rhs(&mut self, t: f64, x: &Self::State) -> SimResult<Self::State> {
         let snapshot = self.solve_snapshot(t, x)?;
         let solution = &snapshot.solution;
+    // Accumulate solver timing stats
+    self.solver_residual_time_s += solution.timing_stats.residual_eval_time_s;
+    self.solver_jacobian_time_s += solution.timing_stats.jacobian_eval_time_s;
+    self.solver_linearch_time_s += solution.timing_stats.linearch_time_s;
+    self.solver_thermo_time_s += solution.timing_stats.thermo_createstate_time_s;
+    self.solver_residual_eval_count += solution.timing_stats.residual_eval_count;
+    self.solver_jacobian_eval_count += solution.timing_stats.jacobian_eval_count;
+    self.solver_linearch_iter_count += solution.timing_stats.linearch_iter_count;
 
         let mut node_states = Vec::new();
         for (i, (&p, &h)) in solution
