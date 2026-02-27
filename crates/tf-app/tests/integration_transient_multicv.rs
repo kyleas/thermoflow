@@ -84,6 +84,10 @@ fn multicv_series_vent_runs_and_stays_physical() {
     );
     assert_eq!(timing.initialization_strategy.as_deref(), Some("Relaxed"));
     assert!(timing.transient_surrogate_populations > 0);
+    assert!(timing.rhs_calls > 0);
+    assert!(timing.rhs_snapshot_time_s > 0.0);
+    assert!(timing.rhs_state_reconstruct_time_s > 0.0);
+    assert!(timing.transient_surrogate_populations <= 4);
 }
 
 #[test]
@@ -104,6 +108,10 @@ fn multicv_pipe_vent_runs_and_stays_physical() {
     );
     assert_eq!(timing.initialization_strategy.as_deref(), Some("Relaxed"));
     assert!(timing.transient_surrogate_populations > 0);
+    assert!(timing.rhs_calls > 0);
+    assert!(timing.rhs_snapshot_time_s > 0.0);
+    assert!(timing.rhs_state_reconstruct_time_s > 0.0);
+    assert!(timing.transient_surrogate_populations <= 4);
 }
 
 #[test]

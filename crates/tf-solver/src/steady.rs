@@ -12,6 +12,25 @@ use tf_fluids::SpecEnthalpy;
 static WEAK_FLOW_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
 const WEAK_FLOW_LOG_LIMIT: usize = 20;
 
+/// Fine-grained timing statistics for solver execution (Phase 0 instrumentation).
+#[derive(Clone, Debug, Default)]
+pub struct SolverTimingStats {
+    /// Total time spent computing residuals (seconds)
+    pub residual_eval_time_s: f64,
+    /// Total time spent computing Jacobians (seconds)
+    pub jacobian_eval_time_s: f64,
+    /// Total time spent in line search (seconds)
+    pub linearch_time_s: f64,
+    /// Total time spent creating thermo states (seconds)
+    pub thermo_createstate_time_s: f64,
+    /// Total number of residual evaluations
+    pub residual_eval_count: usize,
+    /// Total number of Jacobian evaluations
+    pub jacobian_eval_count: usize,
+    /// Total number of line search iterations
+    pub linearch_iter_count: usize,
+}
+
 /// Solution state for a steady-state network.
 #[derive(Clone, Debug)]
 pub struct SteadySolution {
@@ -25,6 +44,8 @@ pub struct SteadySolution {
     pub residual_norm: f64,
     /// Number of iterations
     pub iterations: usize,
+    /// Fine-grained solver timing statistics
+    pub timing_stats: SolverTimingStats,
 }
 
 /// Unpack solution vector [P_0, h_0, P_1, h_1, ...] for free nodes into full arrays.

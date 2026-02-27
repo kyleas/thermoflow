@@ -51,6 +51,24 @@ pub struct RunMetrics {
     pub build_time_s: f64,
     pub solve_time_s: f64,
     pub save_time_s: f64,
+    // Fine-grained solver timing breakdown (Phase 0 instrumentation)
+    pub solve_residual_time_s: Option<f64>,
+    pub solve_jacobian_time_s: Option<f64>,
+    pub solve_linearch_time_s: Option<f64>,
+    pub solve_thermo_time_s: Option<f64>,
+    pub solve_residual_eval_count: Option<usize>,
+    pub solve_jacobian_eval_count: Option<usize>,
+    pub solve_linearch_iter_count: Option<usize>,
+    pub rhs_calls: Option<usize>,
+    pub rhs_snapshot_time_s: Option<f64>,
+    pub rhs_state_reconstruct_time_s: Option<f64>,
+    pub rhs_buffer_init_time_s: Option<f64>,
+    pub rhs_flow_routing_time_s: Option<f64>,
+    pub rhs_cv_derivative_time_s: Option<f64>,
+    pub rhs_lv_derivative_time_s: Option<f64>,
+    pub rhs_assembly_time_s: Option<f64>,
+    pub rhs_surrogate_time_s: Option<f64>,
+    pub rk4_bookkeeping_time_s: Option<f64>,
     pub loaded_from_cache: bool,
     pub initialization_strategy: Option<String>,
     pub steady_iterations: Option<usize>,
@@ -73,6 +91,21 @@ pub struct AggregateMetrics {
     pub solve_time_median_s: f64,
     pub solve_time_min_s: f64,
     pub solve_time_max_s: f64,
+    // Fine-grained solver timing aggregate (Phase 0 instrumentation)
+    pub solve_residual_time_median_s: Option<f64>,
+    pub solve_jacobian_time_median_s: Option<f64>,
+    pub solve_linearch_time_median_s: Option<f64>,
+    pub solve_thermo_time_median_s: Option<f64>,
+    pub rhs_calls_median: Option<usize>,
+    pub rhs_snapshot_time_median_s: Option<f64>,
+    pub rhs_state_reconstruct_time_median_s: Option<f64>,
+    pub rhs_buffer_init_time_median_s: Option<f64>,
+    pub rhs_flow_routing_time_median_s: Option<f64>,
+    pub rhs_cv_derivative_time_median_s: Option<f64>,
+    pub rhs_lv_derivative_time_median_s: Option<f64>,
+    pub rhs_assembly_time_median_s: Option<f64>,
+    pub rhs_surrogate_time_median_s: Option<f64>,
+    pub rk4_bookkeeping_time_median_s: Option<f64>,
     pub steady_iterations_median: Option<usize>,
     pub transient_steps_median: Option<usize>,
     pub transient_cutback_retries_total: usize,
@@ -129,6 +162,39 @@ pub fn run_scenario(
             build_time_s: timing.build_time_s,
             solve_time_s: timing.solve_time_s,
             save_time_s: timing.save_time_s,
+            solve_residual_time_s: (timing.solve_residual_time_s > 0.0)
+                .then_some(timing.solve_residual_time_s),
+            solve_jacobian_time_s: (timing.solve_jacobian_time_s > 0.0)
+                .then_some(timing.solve_jacobian_time_s),
+            solve_linearch_time_s: (timing.solve_linearch_time_s > 0.0)
+                .then_some(timing.solve_linearch_time_s),
+            solve_thermo_time_s: (timing.solve_thermo_time_s > 0.0)
+                .then_some(timing.solve_thermo_time_s),
+            solve_residual_eval_count: (timing.solve_residual_eval_count > 0)
+                .then_some(timing.solve_residual_eval_count),
+            solve_jacobian_eval_count: (timing.solve_jacobian_eval_count > 0)
+                .then_some(timing.solve_jacobian_eval_count),
+            solve_linearch_iter_count: (timing.solve_linearch_iter_count > 0)
+                .then_some(timing.solve_linearch_iter_count),
+            rhs_calls: (timing.rhs_calls > 0).then_some(timing.rhs_calls),
+            rhs_snapshot_time_s: (timing.rhs_snapshot_time_s > 0.0)
+                .then_some(timing.rhs_snapshot_time_s),
+            rhs_state_reconstruct_time_s: (timing.rhs_state_reconstruct_time_s > 0.0)
+                .then_some(timing.rhs_state_reconstruct_time_s),
+            rhs_buffer_init_time_s: (timing.rhs_buffer_init_time_s > 0.0)
+                .then_some(timing.rhs_buffer_init_time_s),
+            rhs_flow_routing_time_s: (timing.rhs_flow_routing_time_s > 0.0)
+                .then_some(timing.rhs_flow_routing_time_s),
+            rhs_cv_derivative_time_s: (timing.rhs_cv_derivative_time_s > 0.0)
+                .then_some(timing.rhs_cv_derivative_time_s),
+            rhs_lv_derivative_time_s: (timing.rhs_lv_derivative_time_s > 0.0)
+                .then_some(timing.rhs_lv_derivative_time_s),
+            rhs_assembly_time_s: (timing.rhs_assembly_time_s > 0.0)
+                .then_some(timing.rhs_assembly_time_s),
+            rhs_surrogate_time_s: (timing.rhs_surrogate_time_s > 0.0)
+                .then_some(timing.rhs_surrogate_time_s),
+            rk4_bookkeeping_time_s: (timing.rk4_bookkeeping_time_s > 0.0)
+                .then_some(timing.rk4_bookkeeping_time_s),
             loaded_from_cache: response.loaded_from_cache,
             initialization_strategy: timing.initialization_strategy.clone(),
             steady_iterations: (timing.steady_iterations > 0).then_some(timing.steady_iterations),
@@ -169,6 +235,20 @@ fn compute_aggregates(runs: &[RunMetrics], _scenario: &BenchmarkScenario) -> Agg
             solve_time_median_s: 0.0,
             solve_time_min_s: 0.0,
             solve_time_max_s: 0.0,
+            solve_residual_time_median_s: None,
+            solve_jacobian_time_median_s: None,
+            solve_linearch_time_median_s: None,
+            solve_thermo_time_median_s: None,
+            rhs_calls_median: None,
+            rhs_snapshot_time_median_s: None,
+            rhs_state_reconstruct_time_median_s: None,
+            rhs_buffer_init_time_median_s: None,
+            rhs_flow_routing_time_median_s: None,
+            rhs_cv_derivative_time_median_s: None,
+            rhs_lv_derivative_time_median_s: None,
+            rhs_assembly_time_median_s: None,
+            rhs_surrogate_time_median_s: None,
+            rk4_bookkeeping_time_median_s: None,
             steady_iterations_median: None,
             transient_steps_median: None,
             transient_cutback_retries_total: 0,
@@ -185,6 +265,121 @@ fn compute_aggregates(runs: &[RunMetrics], _scenario: &BenchmarkScenario) -> Agg
 
     let total_time_median = total_times[total_times.len() / 2];
     let solve_time_median = solve_times[solve_times.len() / 2];
+
+    // Compute fine-grained timing medians (Phase 0 instrumentation)
+    let mut solve_residual_times: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.solve_residual_time_s)
+        .collect();
+    solve_residual_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let solve_residual_time_median = solve_residual_times
+        .get(solve_residual_times.len() / 2)
+        .copied();
+
+    let mut solve_jacobian_times: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.solve_jacobian_time_s)
+        .collect();
+    solve_jacobian_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let solve_jacobian_time_median = solve_jacobian_times
+        .get(solve_jacobian_times.len() / 2)
+        .copied();
+
+    let mut solve_linearch_times: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.solve_linearch_time_s)
+        .collect();
+    solve_linearch_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let solve_linearch_time_median = solve_linearch_times
+        .get(solve_linearch_times.len() / 2)
+        .copied();
+
+    let mut solve_thermo_times: Vec<_> =
+        runs.iter().filter_map(|r| r.solve_thermo_time_s).collect();
+    solve_thermo_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let solve_thermo_time_median = solve_thermo_times
+        .get(solve_thermo_times.len() / 2)
+        .copied();
+
+    let mut rhs_calls: Vec<_> = runs.iter().filter_map(|r| r.rhs_calls).collect();
+    rhs_calls.sort_unstable();
+    let rhs_calls_median = rhs_calls.get(rhs_calls.len() / 2).copied();
+
+    let mut rhs_snapshot_times: Vec<_> =
+        runs.iter().filter_map(|r| r.rhs_snapshot_time_s).collect();
+    rhs_snapshot_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rhs_snapshot_time_median = rhs_snapshot_times
+        .get(rhs_snapshot_times.len() / 2)
+        .copied();
+
+    let mut rhs_state_reconstruct_times: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.rhs_state_reconstruct_time_s)
+        .collect();
+    rhs_state_reconstruct_times
+        .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rhs_state_reconstruct_time_median = rhs_state_reconstruct_times
+        .get(rhs_state_reconstruct_times.len() / 2)
+        .copied();
+
+    let mut rhs_buffer_init_times: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.rhs_buffer_init_time_s)
+        .collect();
+    rhs_buffer_init_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rhs_buffer_init_time_median = rhs_buffer_init_times
+        .get(rhs_buffer_init_times.len() / 2)
+        .copied();
+
+    let mut rhs_flow_routing_times: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.rhs_flow_routing_time_s)
+        .collect();
+    rhs_flow_routing_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rhs_flow_routing_time_median = rhs_flow_routing_times
+        .get(rhs_flow_routing_times.len() / 2)
+        .copied();
+
+    let mut rhs_cv_derivative_times: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.rhs_cv_derivative_time_s)
+        .collect();
+    rhs_cv_derivative_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rhs_cv_derivative_time_median = rhs_cv_derivative_times
+        .get(rhs_cv_derivative_times.len() / 2)
+        .copied();
+
+    let mut rhs_lv_derivative_times: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.rhs_lv_derivative_time_s)
+        .collect();
+    rhs_lv_derivative_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rhs_lv_derivative_time_median = rhs_lv_derivative_times
+        .get(rhs_lv_derivative_times.len() / 2)
+        .copied();
+
+    let mut rhs_assembly_times: Vec<_> =
+        runs.iter().filter_map(|r| r.rhs_assembly_time_s).collect();
+    rhs_assembly_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rhs_assembly_time_median = rhs_assembly_times
+        .get(rhs_assembly_times.len() / 2)
+        .copied();
+
+    let mut rhs_surrogate_times: Vec<_> =
+        runs.iter().filter_map(|r| r.rhs_surrogate_time_s).collect();
+    rhs_surrogate_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rhs_surrogate_time_median = rhs_surrogate_times
+        .get(rhs_surrogate_times.len() / 2)
+        .copied();
+
+    let mut rk4_bookkeeping_times: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.rk4_bookkeeping_time_s)
+        .collect();
+    rk4_bookkeeping_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rk4_bookkeeping_time_median = rk4_bookkeeping_times
+        .get(rk4_bookkeeping_times.len() / 2)
+        .copied();
 
     let mut steady_iters: Vec<_> = runs.iter().filter_map(|r| r.steady_iterations).collect();
     steady_iters.sort_unstable();
@@ -224,6 +419,20 @@ fn compute_aggregates(runs: &[RunMetrics], _scenario: &BenchmarkScenario) -> Agg
         solve_time_median_s: solve_time_median,
         solve_time_min_s: *solve_times.first().unwrap_or(&0.0),
         solve_time_max_s: *solve_times.last().unwrap_or(&0.0),
+        solve_residual_time_median_s: solve_residual_time_median,
+        solve_jacobian_time_median_s: solve_jacobian_time_median,
+        solve_linearch_time_median_s: solve_linearch_time_median,
+        solve_thermo_time_median_s: solve_thermo_time_median,
+        rhs_calls_median,
+        rhs_snapshot_time_median_s: rhs_snapshot_time_median,
+        rhs_state_reconstruct_time_median_s: rhs_state_reconstruct_time_median,
+        rhs_buffer_init_time_median_s: rhs_buffer_init_time_median,
+        rhs_flow_routing_time_median_s: rhs_flow_routing_time_median,
+        rhs_cv_derivative_time_median_s: rhs_cv_derivative_time_median,
+        rhs_lv_derivative_time_median_s: rhs_lv_derivative_time_median,
+        rhs_assembly_time_median_s: rhs_assembly_time_median,
+        rhs_surrogate_time_median_s: rhs_surrogate_time_median,
+        rk4_bookkeeping_time_median_s: rk4_bookkeeping_time_median,
         steady_iterations_median: steady_iters.get(steady_iters.len() / 2).copied(),
         transient_steps_median: transient_steps.get(transient_steps.len() / 2).copied(),
         transient_cutback_retries_total: cutback_total,
@@ -308,6 +517,45 @@ pub fn default_benchmarks() -> Vec<BenchmarkScenario> {
     ]
 }
 
+impl Default for RunMetrics {
+    fn default() -> Self {
+        RunMetrics {
+            total_time_s: 0.0,
+            compile_time_s: 0.0,
+            build_time_s: 0.0,
+            solve_time_s: 0.0,
+            save_time_s: 0.0,
+            solve_residual_time_s: None,
+            solve_jacobian_time_s: None,
+            solve_linearch_time_s: None,
+            solve_thermo_time_s: None,
+            solve_residual_eval_count: None,
+            solve_jacobian_eval_count: None,
+            solve_linearch_iter_count: None,
+            rhs_calls: None,
+            rhs_snapshot_time_s: None,
+            rhs_state_reconstruct_time_s: None,
+            rhs_buffer_init_time_s: None,
+            rhs_flow_routing_time_s: None,
+            rhs_cv_derivative_time_s: None,
+            rhs_lv_derivative_time_s: None,
+            rhs_assembly_time_s: None,
+            rhs_surrogate_time_s: None,
+            rk4_bookkeeping_time_s: None,
+            loaded_from_cache: false,
+            initialization_strategy: None,
+            steady_iterations: None,
+            steady_residual_norm: None,
+            transient_steps: None,
+            transient_cutback_retries: None,
+            transient_fallback_uses: None,
+            transient_real_fluid_attempts: None,
+            transient_real_fluid_successes: None,
+            transient_surrogate_populations: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,6 +612,23 @@ mod tests {
             build_time_s: 0.05,
             solve_time_s: 0.8,
             save_time_s: 0.05,
+            solve_residual_time_s: None,
+            solve_jacobian_time_s: None,
+            solve_linearch_time_s: None,
+            solve_thermo_time_s: None,
+            solve_residual_eval_count: None,
+            solve_jacobian_eval_count: None,
+            solve_linearch_iter_count: None,
+            rhs_calls: None,
+            rhs_snapshot_time_s: None,
+            rhs_state_reconstruct_time_s: None,
+            rhs_buffer_init_time_s: None,
+            rhs_flow_routing_time_s: None,
+            rhs_cv_derivative_time_s: None,
+            rhs_lv_derivative_time_s: None,
+            rhs_assembly_time_s: None,
+            rhs_surrogate_time_s: None,
+            rk4_bookkeeping_time_s: None,
             loaded_from_cache: false,
             initialization_strategy: Some("Strict".to_string()),
             steady_iterations: Some(5),
@@ -511,27 +776,5 @@ mod tests {
 
         assert_eq!(deserialized.timestamp, suite.timestamp);
         assert_eq!(deserialized.results.len(), 0);
-    }
-}
-
-impl Default for RunMetrics {
-    fn default() -> Self {
-        RunMetrics {
-            total_time_s: 0.0,
-            compile_time_s: 0.0,
-            build_time_s: 0.0,
-            solve_time_s: 0.0,
-            save_time_s: 0.0,
-            loaded_from_cache: false,
-            initialization_strategy: None,
-            steady_iterations: None,
-            steady_residual_norm: None,
-            transient_steps: None,
-            transient_cutback_retries: None,
-            transient_fallback_uses: None,
-            transient_real_fluid_attempts: None,
-            transient_real_fluid_successes: None,
-            transient_surrogate_populations: None,
-        }
     }
 }

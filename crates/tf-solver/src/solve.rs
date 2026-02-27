@@ -229,7 +229,7 @@ fn solve_internal(
         // Extract pressures and enthalpies from BCs, then compute mass flows directly.
         // Phase 0: Instrument this direct path since transient uses it exclusively
         let thermo_start = std::time::Instant::now();
-        
+
         let node_count = problem.graph.nodes().len();
         let mut pressures = Vec::with_capacity(node_count);
         let mut enthalpies = Vec::with_capacity(node_count);

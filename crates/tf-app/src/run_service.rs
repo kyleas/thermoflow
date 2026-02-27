@@ -56,6 +56,24 @@ pub struct RunTimingSummary {
     pub save_time_s: f64,
     pub load_cache_time_s: f64,
     pub total_time_s: f64,
+    // Fine-grained solver timing breakdown (Phase 0 instrumentation)
+    pub solve_residual_time_s: f64,
+    pub solve_jacobian_time_s: f64,
+    pub solve_linearch_time_s: f64,
+    pub solve_thermo_time_s: f64,
+    pub solve_residual_eval_count: usize,
+    pub solve_jacobian_eval_count: usize,
+    pub solve_linearch_iter_count: usize,
+    pub rhs_calls: usize,
+    pub rhs_snapshot_time_s: f64,
+    pub rhs_state_reconstruct_time_s: f64,
+    pub rhs_buffer_init_time_s: f64,
+    pub rhs_flow_routing_time_s: f64,
+    pub rhs_cv_derivative_time_s: f64,
+    pub rhs_lv_derivative_time_s: f64,
+    pub rhs_assembly_time_s: f64,
+    pub rhs_surrogate_time_s: f64,
+    pub rk4_bookkeeping_time_s: f64,
     pub transient_steps: usize,
     pub transient_cutback_retries: usize,
     pub transient_fallback_uses: usize,
@@ -499,6 +517,14 @@ fn execute_steady(
     timing.solve_time_s = solve_started.elapsed().as_secs_f64();
     timing.steady_iterations = solution.iterations;
     timing.steady_residual_norm = solution.residual_norm;
+    // Wire up fine-grained solver timing from Phase 0 instrumentation
+    timing.solve_residual_time_s = solution.timing_stats.residual_eval_time_s;
+    timing.solve_jacobian_time_s = solution.timing_stats.jacobian_eval_time_s;
+    timing.solve_linearch_time_s = solution.timing_stats.linearch_time_s;
+    timing.solve_thermo_time_s = solution.timing_stats.thermo_createstate_time_s;
+    timing.solve_residual_eval_count = solution.timing_stats.residual_eval_count;
+    timing.solve_jacobian_eval_count = solution.timing_stats.jacobian_eval_count;
+    timing.solve_linearch_iter_count = solution.timing_stats.linearch_iter_count;
 
     // Convert to timeseries record
     let record = solution_to_timeseries(&solution, &runtime);
@@ -634,6 +660,31 @@ fn execute_transient(
     timing.transient_real_fluid_attempts = model.real_fluid_attempts();
     timing.transient_real_fluid_successes = model.real_fluid_successes();
     timing.transient_surrogate_populations = model.surrogate_populations();
+    // Phase 0 instrumentation: Wire up accumulated solver timing from transient model
+    timing.solve_residual_time_s = model.solver_residual_time_s();
+    timing.solve_jacobian_time_s = model.solver_jacobian_time_s();
+    timing.solve_linearch_time_s = model.solver_linearch_time_s();
+    timing.solve_thermo_time_s = model.solver_thermo_time_s();
+    timing.solve_residual_eval_count = model.solver_residual_eval_count();
+    timing.solve_jacobian_eval_count = model.solver_jacobian_eval_count();
+    timing.solve_linearch_iter_count = model.solver_linearch_iter_count();
+    timing.rhs_calls = model.rhs_calls();
+    timing.rhs_snapshot_time_s = model.rhs_snapshot_time_s();
+    timing.rhs_state_reconstruct_time_s = model.rhs_state_reconstruct_time_s();
+    timing.rhs_buffer_init_time_s = model.rhs_buffer_init_time_s();
+    timing.rhs_flow_routing_time_s = model.rhs_flow_routing_time_s();
+    timing.rhs_cv_derivative_time_s = model.rhs_cv_derivative_time_s();
+    timing.rhs_lv_derivative_time_s = model.rhs_lv_derivative_time_s();
+    timing.rhs_assembly_time_s = model.rhs_assembly_time_s();
+    timing.rhs_surrogate_time_s = model.rhs_surrogate_time_s();
+    let rhs_accounted = timing.rhs_snapshot_time_s
+        + timing.rhs_state_reconstruct_time_s
+        + timing.rhs_buffer_init_time_s
+        + timing.rhs_flow_routing_time_s
+        + timing.rhs_cv_derivative_time_s
+        + timing.rhs_lv_derivative_time_s
+        + timing.rhs_assembly_time_s;
+    timing.rk4_bookkeeping_time_s = (timing.solve_time_s - rhs_accounted).max(0.0);
 
     // Convert simulation records to timeseries records for storage
     let mut timeseries_records = Vec::with_capacity(sim_record.t.len());

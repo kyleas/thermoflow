@@ -355,6 +355,65 @@ fn print_timing_summary(mode: &RunMode, timing: &tf_app::RunTimingSummary) {
         println!("  Build:   {:.3}s ({:.1}%)", timing.build_time_s, build_pct);
     }
     println!("  Solve:   {:.3}s ({:.1}%)", timing.solve_time_s, solve_pct);
+
+    // Phase 0 instrumentation: Show fine-grained solver timing if available
+    if timing.solve_residual_time_s > 0.0 {
+        let res_pct = 100.0 * timing.solve_residual_time_s / timing.solve_time_s;
+        println!(
+            "    Residual eval: {:.3}s ({:.1}%)",
+            timing.solve_residual_time_s, res_pct
+        );
+    }
+    if timing.solve_jacobian_time_s > 0.0 {
+        let jac_pct = 100.0 * timing.solve_jacobian_time_s / timing.solve_time_s;
+        println!(
+            "    Jacobian eval: {:.3}s ({:.1}%)",
+            timing.solve_jacobian_time_s, jac_pct
+        );
+    }
+    if timing.solve_linearch_time_s > 0.0 {
+        let ls_pct = 100.0 * timing.solve_linearch_time_s / timing.solve_time_s;
+        println!(
+            "    Line search:   {:.3}s ({:.1}%)",
+            timing.solve_linearch_time_s, ls_pct
+        );
+    }
+    if timing.solve_thermo_time_s > 0.0 {
+        let th_pct = 100.0 * timing.solve_thermo_time_s / timing.solve_time_s;
+        println!(
+            "    Thermo state:  {:.3}s ({:.1}%)",
+            timing.solve_thermo_time_s, th_pct
+        );
+    }
+    if timing.rhs_snapshot_time_s > 0.0 {
+        let pct = 100.0 * timing.rhs_snapshot_time_s / timing.solve_time_s;
+        println!(
+            "    RHS snapshot: {:.3}s ({:.1}%)",
+            timing.rhs_snapshot_time_s, pct
+        );
+    }
+    if timing.rhs_state_reconstruct_time_s > 0.0 {
+        let pct = 100.0 * timing.rhs_state_reconstruct_time_s / timing.solve_time_s;
+        println!(
+            "    RHS state rebuild: {:.3}s ({:.1}%)",
+            timing.rhs_state_reconstruct_time_s, pct
+        );
+    }
+    if timing.rhs_flow_routing_time_s > 0.0 {
+        let pct = 100.0 * timing.rhs_flow_routing_time_s / timing.solve_time_s;
+        println!(
+            "    RHS flow routing: {:.3}s ({:.1}%)",
+            timing.rhs_flow_routing_time_s, pct
+        );
+    }
+    if timing.rhs_surrogate_time_s > 0.0 {
+        let pct = 100.0 * timing.rhs_surrogate_time_s / timing.solve_time_s;
+        println!(
+            "    RHS surrogate work: {:.3}s ({:.1}%)",
+            timing.rhs_surrogate_time_s, pct
+        );
+    }
+
     println!("  Save:    {:.3}s ({:.1}%)", timing.save_time_s, save_pct);
     if timing.load_cache_time_s > 0.0 {
         println!("  Cache load: {:.3}s", timing.load_cache_time_s);
@@ -366,6 +425,19 @@ fn print_timing_summary(mode: &RunMode, timing: &tf_app::RunTimingSummary) {
             println!("  Steady iterations: {}", timing.steady_iterations);
             if timing.steady_residual_norm > 0.0 {
                 println!("  Final residual: {:.3e}", timing.steady_residual_norm);
+            }
+            // Phase 0: Show residual eval counts
+            if timing.solve_residual_eval_count > 0 {
+                println!(
+                    "  Residual evaluations: {}",
+                    timing.solve_residual_eval_count
+                );
+            }
+            if timing.solve_jacobian_eval_count > 0 {
+                println!(
+                    "  Jacobian evaluations: {}",
+                    timing.solve_jacobian_eval_count
+                );
             }
         }
         RunMode::Transient { .. } => {

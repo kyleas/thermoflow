@@ -19,6 +19,7 @@ pub struct SurrogateSample {
 }
 
 /// Transient fallback policy with surrogate models and diagnostics.
+#[derive(Clone)]
 pub struct TransientFallbackPolicy {
     /// Surrogate models per node (index matches node id)
     surrogates: Vec<Option<Arc<FrozenPropertySurrogate>>>,

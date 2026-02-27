@@ -22,5 +22,5 @@ pub use solve::{
     solve_with_progress, solve_with_strategy, solve_with_strategy_and_progress,
     solve_with_strategy_policy_and_progress,
 };
-pub use steady::SteadySolution;
+pub use steady::{SolverTimingStats, SteadySolution};
 pub use thermo_policy::{StateCreationResult, StrictPolicy, ThermoStatePolicy};

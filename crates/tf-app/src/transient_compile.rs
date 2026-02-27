@@ -8,6 +8,7 @@
 //! - Integration with tf-sim for time-stepping
 
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use tf_components::{LineVolume, Orifice, Pipe, Pump, Turbine, TwoPortComponent, Valve, ValveLaw};
 use tf_core::timing::Timer;
@@ -72,6 +73,31 @@ impl TransientLogMode {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct FlowRoute {
+    inlet_node: NodeId,
+    outlet_node: NodeId,
+    inlet_idx: usize,
+    outlet_idx: usize,
+    inlet_cv_idx: Option<usize>,
+    outlet_cv_idx: Option<usize>,
+    line_volume_idx: Option<usize>,
+}
+
+#[derive(Default, Clone, Debug)]
+struct RhsTimingBreakdown {
+    rhs_calls: usize,
+    rhs_snapshot_time_s: f64,
+    rhs_state_reconstruct_time_s: f64,
+    rhs_buffer_init_time_s: f64,
+    rhs_flow_routing_time_s: f64,
+    rhs_cv_derivative_time_s: f64,
+    rhs_lv_derivative_time_s: f64,
+    rhs_assembly_time_s: f64,
+    rhs_surrogate_time_s: f64,
+    rk4_bookkeeping_time_s: f64,
+}
+
 pub struct TransientNetworkModel {
     system: SystemDef,
     runtime: SystemRuntime,
@@ -84,7 +110,7 @@ pub struct TransientNetworkModel {
     line_volumes: Vec<ControlVolume>, // Uses CV mechanics for storage
     #[allow(dead_code)]
     lv_comp_ids: Vec<CompId>, // Component IDs of LineVolume components
-    lv_index_by_comp: HashMap<CompId, usize>, // Map comp_id -> line_volume index
+    flow_routes: HashMap<CompId, FlowRoute>,
     initial_state: TransientState,
     schedules: ScheduleData,
     has_dynamic_schedules: bool,
@@ -96,6 +122,7 @@ pub struct TransientNetworkModel {
     #[allow(dead_code)]
     last_lv_enthalpy: Vec<Option<f64>>, // LineVolume internal enthalpies
     solution_cache: HashMap<i64, SteadySolution>,
+    fallback_policy_cache: Option<crate::transient_fallback_policy::TransientFallbackPolicy>,
     last_active_components: HashSet<CompId>,
     last_valve_positions: HashMap<String, f64>, // Track valve positions for continuation
     last_time: f64,                             // Track last solve time for event detection
@@ -124,6 +151,7 @@ pub struct TransientNetworkModel {
     solver_residual_eval_count: usize,
     solver_jacobian_eval_count: usize,
     solver_linearch_iter_count: usize,
+    rhs_timing: RhsTimingBreakdown,
     log_mode: TransientLogMode,
 }
 
@@ -155,6 +183,34 @@ impl TransientNetworkModel {
         let (line_volumes, lv_comp_ids, lv_index_by_comp, lv_initial_states) =
             build_line_volume_storage(system, runtime, fluid_model.as_ref(), composition.clone())
                 .map_err(|e| AppError::TransientCompile { message: e })?;
+
+        let mut flow_routes = HashMap::new();
+        for comp_info in runtime.graph.components() {
+            let comp_id = comp_info.id;
+            let inlet_node = runtime.graph.comp_inlet_node(comp_id).ok_or_else(|| {
+                AppError::TransientCompile {
+                    message: format!("Component {:?} has no inlet node", comp_id),
+                }
+            })?;
+            let outlet_node = runtime.graph.comp_outlet_node(comp_id).ok_or_else(|| {
+                AppError::TransientCompile {
+                    message: format!("Component {:?} has no outlet node", comp_id),
+                }
+            })?;
+
+            flow_routes.insert(
+                comp_id,
+                FlowRoute {
+                    inlet_node,
+                    outlet_node,
+                    inlet_idx: inlet_node.index() as usize,
+                    outlet_idx: outlet_node.index() as usize,
+                    inlet_cv_idx: cv_index_by_node.get(&inlet_node).copied(),
+                    outlet_cv_idx: cv_index_by_node.get(&outlet_node).copied(),
+                    line_volume_idx: lv_index_by_comp.get(&comp_id).copied(),
+                },
+            );
+        }
 
         let initial_state = TransientState {
             control_volumes: cv_initial_states,
@@ -236,7 +292,7 @@ impl TransientNetworkModel {
             cv_index_by_node,
             line_volumes,
             lv_comp_ids,
-            lv_index_by_comp,
+            flow_routes,
             initial_state,
             schedules,
             has_dynamic_schedules,
@@ -246,6 +302,7 @@ impl TransientNetworkModel {
             last_lv_pressure,
             last_lv_enthalpy,
             solution_cache: HashMap::new(),
+            fallback_policy_cache: None,
             last_active_components: HashSet::new(),
             last_valve_positions,
             last_time: 0.0,
@@ -265,6 +322,7 @@ impl TransientNetworkModel {
             solver_residual_eval_count: 0,
             solver_jacobian_eval_count: 0,
             solver_linearch_iter_count: 0,
+            rhs_timing: RhsTimingBreakdown::default(),
             log_mode,
         })
     }
@@ -313,6 +371,46 @@ impl TransientNetworkModel {
 
     pub fn solver_linearch_iter_count(&self) -> usize {
         self.solver_linearch_iter_count
+    }
+
+    pub fn rhs_calls(&self) -> usize {
+        self.rhs_timing.rhs_calls
+    }
+
+    pub fn rhs_snapshot_time_s(&self) -> f64 {
+        self.rhs_timing.rhs_snapshot_time_s
+    }
+
+    pub fn rhs_state_reconstruct_time_s(&self) -> f64 {
+        self.rhs_timing.rhs_state_reconstruct_time_s
+    }
+
+    pub fn rhs_buffer_init_time_s(&self) -> f64 {
+        self.rhs_timing.rhs_buffer_init_time_s
+    }
+
+    pub fn rhs_flow_routing_time_s(&self) -> f64 {
+        self.rhs_timing.rhs_flow_routing_time_s
+    }
+
+    pub fn rhs_cv_derivative_time_s(&self) -> f64 {
+        self.rhs_timing.rhs_cv_derivative_time_s
+    }
+
+    pub fn rhs_lv_derivative_time_s(&self) -> f64 {
+        self.rhs_timing.rhs_lv_derivative_time_s
+    }
+
+    pub fn rhs_assembly_time_s(&self) -> f64 {
+        self.rhs_timing.rhs_assembly_time_s
+    }
+
+    pub fn rhs_surrogate_time_s(&self) -> f64 {
+        self.rhs_timing.rhs_surrogate_time_s
+    }
+
+    pub fn rk4_bookkeeping_time_s(&self) -> f64 {
+        self.rhs_timing.rk4_bookkeeping_time_s
     }
 
     /// Print transient simulation diagnostics.
@@ -463,6 +561,7 @@ impl TransientNetworkModel {
 
     fn solve_snapshot(&mut self, time_s: f64, state: &TransientState) -> SimResult<Snapshot> {
         let _timer = Timer::start("transient_snapshot_solve");
+        let mut surrogate_time_s = 0.0;
 
         let mut problem = SteadyProblem::new(
             &self.runtime.graph,
@@ -834,6 +933,7 @@ impl TransientNetworkModel {
                 } // end if all_states_valid
             }
             self.solution_cache.clear();
+            self.fallback_policy_cache = None;
         }
 
         // Check for large valve position changes that need continuation
@@ -1020,7 +1120,9 @@ impl TransientNetworkModel {
                     ..Default::default()
                 });
 
+                let surrogate_started = Instant::now();
                 let (mut fallback_policy, populated_count) = make_policy(warm_start);
+                surrogate_time_s += surrogate_started.elapsed().as_secs_f64();
                 if populated_count > 0 {
                     self.surrogate_populations += populated_count;
                     if self.log_mode.is_verbose() {
@@ -1139,6 +1241,7 @@ impl TransientNetworkModel {
                     };
 
                     // Update surrogates from successful solution so next substep uses better fallbacks
+                    let surrogate_update_started = Instant::now();
                     let mut updated_count = 0;
                     for node_idx in 0..num_nodes {
                         if let (Some(&p), Some(&h)) = (
@@ -1179,6 +1282,7 @@ impl TransientNetworkModel {
                     if updated_count > 0 {
                         self.surrogate_populations += updated_count;
                     }
+                    surrogate_time_s += surrogate_update_started.elapsed().as_secs_f64();
                     if updated_count > 0 && substep == substeps && self.log_mode.is_verbose() {
                         eprintln!(
                             "[SURROGATE] Updated {} surrogates from final substep",
@@ -1219,7 +1323,16 @@ impl TransientNetworkModel {
                 ),
             })?
         } else {
-            let (fallback_policy, populated_count) = make_policy(warm_start);
+            let (fallback_policy, populated_count) =
+                if let Some(cached_policy) = self.fallback_policy_cache.as_ref() {
+                    (cached_policy.clone(), 0)
+                } else {
+                    let surrogate_started = Instant::now();
+                    let (policy, populated) = make_policy(warm_start);
+                    surrogate_time_s += surrogate_started.elapsed().as_secs_f64();
+                    (policy, populated)
+                };
+
             if populated_count > 0 {
                 self.surrogate_populations += populated_count;
                 if self.log_mode.is_verbose() {
@@ -1229,6 +1342,8 @@ impl TransientNetworkModel {
                     );
                 }
             }
+
+            self.fallback_policy_cache = Some(fallback_policy.clone());
             tf_solver::solve_with_active_and_policy(
                 &mut problem,
                 solver_config,
@@ -1263,18 +1378,14 @@ impl TransientNetworkModel {
             }
         }
 
+        self.rhs_timing.rhs_surrogate_time_s += surrogate_time_s;
+        let components_for_snapshot = std::mem::take(&mut problem.components);
+        drop(problem);
+
         self.last_steady_solution = Some(solution.clone());
         self.store_solution_cache(time_s, solution.clone());
         self.last_active_components = active_components.clone();
         self.last_time = time_s;
-
-        let components_for_snapshot = build_components_with_schedules(
-            &self.system,
-            &self.runtime.comp_id_map,
-            &self.schedules,
-            time_s,
-        )
-        .map_err(|e| SimError::Backend { message: e })?;
 
         // Update junction thermal state using relaxed mixing (PHASE 2)
         // After hydraulic solve, relax junction enthalpies toward their mixed values
@@ -1321,6 +1432,7 @@ impl TransientNetworkModel {
         }
 
         // For each junction, compute mixed enthalpy from incoming streams
+        let mass_flow_by_comp: HashMap<CompId, f64> = solution.mass_flows.iter().copied().collect();
         for &junction_node_id in &self.junction_node_ids {
             let node_idx = junction_node_id.index() as usize;
 
@@ -1328,60 +1440,32 @@ impl TransientNetworkModel {
             let mut incoming_enthalpy_flux = 0.0; // mdot * h (W)
             let mut total_incoming_mdot = 0.0; // kg/s
 
-            for comp_info in self.runtime.graph.components() {
-                let comp_id = comp_info.id;
+            for (comp_id, route) in &self.flow_routes {
+                let mdot = match mass_flow_by_comp.get(comp_id) {
+                    Some(mdot) => *mdot,
+                    None => continue,
+                };
 
                 // Check if this component flows into the junction
-                if let Some(outlet_node) = self.runtime.graph.comp_outlet_node(comp_id) {
-                    if outlet_node == junction_node_id {
-                        // This component flows into the junction
-                        if let Some((_, mdot)) =
-                            solution.mass_flows.iter().find(|(id, _)| *id == comp_id)
-                        {
-                            if *mdot > 0.0 {
-                                // Positive flow into junction
-                                if let Some(inlet_node) =
-                                    self.runtime.graph.comp_inlet_node(comp_id)
-                                {
-                                    let inlet_idx = inlet_node.index() as usize;
-                                    if let Some(&h_inlet) = solution.enthalpies.get(inlet_idx) {
-                                        incoming_enthalpy_flux += mdot * h_inlet;
-                                        total_incoming_mdot += mdot;
-                                    }
-                                }
-                            } else if *mdot < 0.0 {
-                                // Reverse flow: junction flows back into component outlet
-                                // Use junction's own enthalpy
-                                if let Some(&h_junction) = solution.enthalpies.get(node_idx) {
-                                    incoming_enthalpy_flux += mdot.abs() * h_junction;
-                                    total_incoming_mdot += mdot.abs();
-                                }
-                            }
+                if route.outlet_node == junction_node_id {
+                    if mdot > 0.0 {
+                        if let Some(&h_inlet) = solution.enthalpies.get(route.inlet_idx) {
+                            incoming_enthalpy_flux += mdot * h_inlet;
+                            total_incoming_mdot += mdot;
+                        }
+                    } else if mdot < 0.0 {
+                        if let Some(&h_junction) = solution.enthalpies.get(node_idx) {
+                            incoming_enthalpy_flux += mdot.abs() * h_junction;
+                            total_incoming_mdot += mdot.abs();
                         }
                     }
                 }
 
                 // Check if this component draws from the junction
-                if let Some(inlet_node) = self.runtime.graph.comp_inlet_node(comp_id) {
-                    if inlet_node == junction_node_id {
-                        // This component draws from the junction
-                        if let Some((_, mdot)) =
-                            solution.mass_flows.iter().find(|(id, _)| *id == comp_id)
-                        {
-                            if *mdot < 0.0 {
-                                // Reverse flow: component outlet flows back into junction
-                                if let Some(outlet_node) =
-                                    self.runtime.graph.comp_outlet_node(comp_id)
-                                {
-                                    let outlet_idx = outlet_node.index() as usize;
-                                    if let Some(&h_outlet) = solution.enthalpies.get(outlet_idx) {
-                                        incoming_enthalpy_flux += mdot.abs() * h_outlet;
-                                        total_incoming_mdot += mdot.abs();
-                                    }
-                                }
-                            }
-                            // Positive flow out of junction doesn't contribute to incoming
-                        }
+                if route.inlet_node == junction_node_id && mdot < 0.0 {
+                    if let Some(&h_outlet) = solution.enthalpies.get(route.outlet_idx) {
+                        incoming_enthalpy_flux += mdot.abs() * h_outlet;
+                        total_incoming_mdot += mdot.abs();
                     }
                 }
             }
@@ -1431,17 +1515,22 @@ impl TransientModel for TransientNetworkModel {
     }
 
     fn rhs(&mut self, t: f64, x: &Self::State) -> SimResult<Self::State> {
-        let snapshot = self.solve_snapshot(t, x)?;
-        let solution = &snapshot.solution;
-    // Accumulate solver timing stats
-    self.solver_residual_time_s += solution.timing_stats.residual_eval_time_s;
-    self.solver_jacobian_time_s += solution.timing_stats.jacobian_eval_time_s;
-    self.solver_linearch_time_s += solution.timing_stats.linearch_time_s;
-    self.solver_thermo_time_s += solution.timing_stats.thermo_createstate_time_s;
-    self.solver_residual_eval_count += solution.timing_stats.residual_eval_count;
-    self.solver_jacobian_eval_count += solution.timing_stats.jacobian_eval_count;
-    self.solver_linearch_iter_count += solution.timing_stats.linearch_iter_count;
+        self.rhs_timing.rhs_calls += 1;
 
+        let snapshot_started = Instant::now();
+        let snapshot = self.solve_snapshot(t, x)?;
+        self.rhs_timing.rhs_snapshot_time_s += snapshot_started.elapsed().as_secs_f64();
+        let solution = &snapshot.solution;
+
+        self.solver_residual_time_s += solution.timing_stats.residual_eval_time_s;
+        self.solver_jacobian_time_s += solution.timing_stats.jacobian_eval_time_s;
+        self.solver_linearch_time_s += solution.timing_stats.linearch_time_s;
+        self.solver_thermo_time_s += solution.timing_stats.thermo_createstate_time_s;
+        self.solver_residual_eval_count += solution.timing_stats.residual_eval_count;
+        self.solver_jacobian_eval_count += solution.timing_stats.jacobian_eval_count;
+        self.solver_linearch_iter_count += solution.timing_stats.linearch_iter_count;
+
+        let state_reconstruct_started = Instant::now();
         let mut node_states = Vec::new();
         for (i, (&p, &h)) in solution
             .pressures
@@ -1452,7 +1541,10 @@ impl TransientModel for TransientNetworkModel {
             let state = self.create_state_with_fallback(p, h, i)?;
             node_states.push(state);
         }
+        self.rhs_timing.rhs_state_reconstruct_time_s +=
+            state_reconstruct_started.elapsed().as_secs_f64();
 
+        let buffer_init_started = Instant::now();
         // Control Volume storage dynamics
         let mut dm_in = vec![0.0; self.control_volumes.len()];
         let mut dm_out = vec![0.0; self.control_volumes.len()];
@@ -1464,28 +1556,19 @@ impl TransientModel for TransientNetworkModel {
         let mut lv_dm_out = vec![0.0; self.line_volumes.len()];
         let mut lv_dmh_in = vec![0.0; self.line_volumes.len()];
         let mut lv_dmh_out = vec![0.0; self.line_volumes.len()];
+        self.rhs_timing.rhs_buffer_init_time_s += buffer_init_started.elapsed().as_secs_f64();
 
+        let routing_started = Instant::now();
         for (comp_id, mdot) in &solution.mass_flows {
-            let inlet_node = self
-                .runtime
-                .graph
-                .comp_inlet_node(*comp_id)
+            let route = self
+                .flow_routes
+                .get(comp_id)
                 .ok_or_else(|| SimError::Backend {
-                    message: format!("Component {:?} has no inlet", comp_id),
-                })?;
-            let outlet_node = self
-                .runtime
-                .graph
-                .comp_outlet_node(*comp_id)
-                .ok_or_else(|| SimError::Backend {
-                    message: format!("Component {:?} has no outlet", comp_id),
+                    message: format!("Missing flow route metadata for component {:?}", comp_id),
                 })?;
 
-            let inlet_idx = inlet_node.index() as usize;
-            let outlet_idx = outlet_node.index() as usize;
-
-            let inlet_state = &node_states[inlet_idx];
-            let outlet_state = &node_states[outlet_idx];
+            let inlet_state = &node_states[route.inlet_idx];
+            let outlet_state = &node_states[route.outlet_idx];
 
             let component_model =
                 snapshot
@@ -1495,35 +1578,31 @@ impl TransientModel for TransientNetworkModel {
                         message: format!("Component model not found for {:?}", comp_id),
                     })?;
 
-            // Check if this component is a LineVolume with its own storage
-            let is_line_volume = self.lv_index_by_comp.contains_key(comp_id);
+            let line_volume_idx = route.line_volume_idx;
 
             if *mdot >= 0.0 {
                 // Flow from inlet to outlet
-                if let Some(&cv_idx) = self.cv_index_by_node.get(&inlet_node) {
+                if let Some(cv_idx) = route.inlet_cv_idx {
                     dm_out[cv_idx] += *mdot;
                     dmh_out[cv_idx] += *mdot * x.control_volumes[cv_idx].h_j_per_kg;
                 }
 
                 // LineVolume storage: inlet side
-                if is_line_volume {
-                    if let Some(&lv_idx) = self.lv_index_by_comp.get(comp_id) {
-                        lv_dm_in[lv_idx] += *mdot;
-                        // Enthalpy entering the LineVolume equals inlet node enthalpy
-                        let h_in =
-                            self.fluid_model
-                                .h(inlet_state)
-                                .map_err(|e| SimError::Backend {
-                                    message: format!(
-                                        "Failed to get inlet enthalpy for LineVolume {:?}: {}",
-                                        comp_id, e
-                                    ),
-                                })?;
-                        lv_dmh_in[lv_idx] += *mdot * h_in;
-                    }
+                if let Some(lv_idx) = line_volume_idx {
+                    lv_dm_in[lv_idx] += *mdot;
+                    let h_in = self
+                        .fluid_model
+                        .h(inlet_state)
+                        .map_err(|e| SimError::Backend {
+                            message: format!(
+                                "Failed to get inlet enthalpy for LineVolume {:?}: {}",
+                                comp_id, e
+                            ),
+                        })?;
+                    lv_dmh_in[lv_idx] += *mdot * h_in;
                 }
 
-                if let Some(&cv_idx) = self.cv_index_by_node.get(&outlet_node) {
+                if let Some(cv_idx) = route.outlet_cv_idx {
                     let ports = tf_components::PortStates {
                         inlet: inlet_state,
                         outlet: outlet_state,
@@ -1539,41 +1618,35 @@ impl TransientModel for TransientNetworkModel {
                 }
 
                 // LineVolume storage: outlet side
-                if is_line_volume {
-                    if let Some(&lv_idx) = self.lv_index_by_comp.get(comp_id) {
-                        // Mass and enthalpy leaving the LineVolume
-                        lv_dm_out[lv_idx] += *mdot;
-                        lv_dmh_out[lv_idx] += *mdot * x.line_volumes[lv_idx].h_j_per_kg;
-                    }
+                if let Some(lv_idx) = line_volume_idx {
+                    lv_dm_out[lv_idx] += *mdot;
+                    lv_dmh_out[lv_idx] += *mdot * x.line_volumes[lv_idx].h_j_per_kg;
                 }
             } else {
                 let mdot_abs = -(*mdot);
 
                 // Flow from outlet to inlet
-                if let Some(&cv_idx) = self.cv_index_by_node.get(&outlet_node) {
+                if let Some(cv_idx) = route.outlet_cv_idx {
                     dm_out[cv_idx] += mdot_abs;
                     dmh_out[cv_idx] += mdot_abs * x.control_volumes[cv_idx].h_j_per_kg;
                 }
 
                 // LineVolume storage: outlet side (reverse flow)
-                if is_line_volume {
-                    if let Some(&lv_idx) = self.lv_index_by_comp.get(comp_id) {
-                        lv_dm_in[lv_idx] += mdot_abs;
-                        // Enthalpy entering the LineVolume from outlet side
-                        let h_in =
-                            self.fluid_model
-                                .h(outlet_state)
-                                .map_err(|e| SimError::Backend {
-                                    message: format!(
-                                        "Failed to get outlet enthalpy for LineVolume {:?}: {}",
-                                        comp_id, e
-                                    ),
-                                })?;
-                        lv_dmh_in[lv_idx] += mdot_abs * h_in;
-                    }
+                if let Some(lv_idx) = line_volume_idx {
+                    lv_dm_in[lv_idx] += mdot_abs;
+                    let h_in = self
+                        .fluid_model
+                        .h(outlet_state)
+                        .map_err(|e| SimError::Backend {
+                            message: format!(
+                                "Failed to get outlet enthalpy for LineVolume {:?}: {}",
+                                comp_id, e
+                            ),
+                        })?;
+                    lv_dmh_in[lv_idx] += mdot_abs * h_in;
                 }
 
-                if let Some(&cv_idx) = self.cv_index_by_node.get(&inlet_node) {
+                if let Some(cv_idx) = route.inlet_cv_idx {
                     let ports = tf_components::PortStates {
                         inlet: outlet_state,
                         outlet: inlet_state,
@@ -1589,16 +1662,15 @@ impl TransientModel for TransientNetworkModel {
                 }
 
                 // LineVolume storage: inlet side (reverse flow)
-                if is_line_volume {
-                    if let Some(&lv_idx) = self.lv_index_by_comp.get(comp_id) {
-                        // Mass and enthalpy leaving the LineVolume from inlet side
-                        lv_dm_out[lv_idx] += mdot_abs;
-                        lv_dmh_out[lv_idx] += mdot_abs * x.line_volumes[lv_idx].h_j_per_kg;
-                    }
+                if let Some(lv_idx) = line_volume_idx {
+                    lv_dm_out[lv_idx] += mdot_abs;
+                    lv_dmh_out[lv_idx] += mdot_abs * x.line_volumes[lv_idx].h_j_per_kg;
                 }
             }
         }
+        self.rhs_timing.rhs_flow_routing_time_s += routing_started.elapsed().as_secs_f64();
 
+        let cv_deriv_started = Instant::now();
         // Compute CV derivatives
         let mut cv_deriv = Vec::new();
         for i in 0..self.control_volumes.len() {
@@ -1617,7 +1689,9 @@ impl TransientModel for TransientNetworkModel {
                 h_j_per_kg: h_dot,
             });
         }
+        self.rhs_timing.rhs_cv_derivative_time_s += cv_deriv_started.elapsed().as_secs_f64();
 
+        let lv_deriv_started = Instant::now();
         // Compute LineVolume derivatives
         let mut lv_deriv = Vec::new();
         for i in 0..self.line_volumes.len() {
@@ -1636,11 +1710,16 @@ impl TransientModel for TransientNetworkModel {
                 h_j_per_kg: h_dot,
             });
         }
+        self.rhs_timing.rhs_lv_derivative_time_s += lv_deriv_started.elapsed().as_secs_f64();
 
-        Ok(TransientState {
+        let assembly_started = Instant::now();
+        let output = TransientState {
             control_volumes: cv_deriv,
             line_volumes: lv_deriv,
-        })
+        };
+        self.rhs_timing.rhs_assembly_time_s += assembly_started.elapsed().as_secs_f64();
+
+        Ok(output)
     }
 
     fn add(&self, a: &Self::State, b: &Self::State) -> Self::State {
