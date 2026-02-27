@@ -88,6 +88,7 @@ struct FlowRoute {
 struct RhsTimingBreakdown {
     rhs_calls: usize,
     rhs_snapshot_time_s: f64,
+    rhs_component_build_time_s: f64,
     rhs_state_reconstruct_time_s: f64,
     rhs_buffer_init_time_s: f64,
     rhs_flow_routing_time_s: f64,
@@ -96,6 +97,100 @@ struct RhsTimingBreakdown {
     rhs_assembly_time_s: f64,
     rhs_surrogate_time_s: f64,
     rk4_bookkeeping_time_s: f64,
+}
+
+/// Pre-allocated reusable buffers for RHS computation.
+#[derive(Clone, Debug)]
+struct RhsScratch {
+    // Control Volume accumulator buffers
+    cv_dm_in: Vec<f64>,
+    cv_dm_out: Vec<f64>,
+    cv_dmh_in: Vec<f64>,
+    cv_dmh_out: Vec<f64>,
+    // LineVolume accumulator buffers
+    lv_dm_in: Vec<f64>,
+    lv_dm_out: Vec<f64>,
+    lv_dmh_in: Vec<f64>,
+    lv_dmh_out: Vec<f64>,
+}
+
+impl RhsScratch {
+    fn new(num_cvs: usize, num_lvs: usize) -> Self {
+        Self {
+            cv_dm_in: vec![0.0; num_cvs],
+            cv_dm_out: vec![0.0; num_cvs],
+            cv_dmh_in: vec![0.0; num_cvs],
+            cv_dmh_out: vec![0.0; num_cvs],
+            lv_dm_in: vec![0.0; num_lvs],
+            lv_dm_out: vec![0.0; num_lvs],
+            lv_dmh_in: vec![0.0; num_lvs],
+            lv_dmh_out: vec![0.0; num_lvs],
+        }
+    }
+
+    fn clear(&mut self) {
+        for v in &mut self.cv_dm_in {
+            *v = 0.0;
+        }
+        for v in &mut self.cv_dm_out {
+            *v = 0.0;
+        }
+        for v in &mut self.cv_dmh_in {
+            *v = 0.0;
+        }
+        for v in &mut self.cv_dmh_out {
+            *v = 0.0;
+        }
+        for v in &mut self.lv_dm_in {
+            *v = 0.0;
+        }
+        for v in &mut self.lv_dm_out {
+            *v = 0.0;
+        }
+        for v in &mut self.lv_dmh_in {
+            *v = 0.0;
+        }
+        for v in &mut self.lv_dmh_out {
+            *v = 0.0;
+        }
+    }
+}
+
+/// Per-stage cache of reconstructed thermodynamic states.
+/// Avoids repeated state reconstruction for the same node within a single RHS evaluation.
+#[derive(Clone, Debug)]
+struct StageStateCache {
+    cached_states: Vec<Option<ThermoState>>,
+}
+
+impl StageStateCache {
+    fn new(num_nodes: usize) -> Self {
+        Self {
+            cached_states: vec![None; num_nodes],
+        }
+    }
+
+    fn get(&self, node_idx: usize) -> Option<&ThermoState> {
+        self.cached_states.get(node_idx)?.as_ref()
+    }
+
+    fn insert(&mut self, node_idx: usize, state: ThermoState) {
+        if let Some(slot) = self.cached_states.get_mut(node_idx) {
+            *slot = Some(state);
+        }
+    }
+
+    fn clear(&mut self) {
+        for slot in &mut self.cached_states {
+            *slot = None;
+        }
+    }
+}
+
+/// Persistent execution plan metadata.
+/// Tracks component state to detect when rebuilds are necessary.
+struct TransientExecutionPlan {
+    current_valve_positions: HashMap<String, f64>,
 }
 
 pub struct TransientNetworkModel {
@@ -153,6 +248,11 @@ pub struct TransientNetworkModel {
     solver_linearch_iter_count: usize,
     rhs_timing: RhsTimingBreakdown,
     log_mode: TransientLogMode,
+
+    // Phase 4 optimization: Persistent execution plan, state cache, and scratch buffers
+    execution_plan: Option<TransientExecutionPlan>,
+    state_cache: StageStateCache,
+    rhs_scratch: RhsScratch,
 }
 
 struct Snapshot {
@@ -277,6 +377,11 @@ impl TransientNetworkModel {
             );
         }
 
+        // Pre-compute sizes for scratch buffer allocation before moving vectors
+        let num_cvs = control_volumes.len();
+        let num_lvs = line_volumes.len();
+        let num_nodes = runtime.graph.nodes().len();
+
         Ok(Self {
             system: system.clone(),
             runtime: SystemRuntime {
@@ -324,6 +429,9 @@ impl TransientNetworkModel {
             solver_linearch_iter_count: 0,
             rhs_timing: RhsTimingBreakdown::default(),
             log_mode,
+            execution_plan: None,
+            state_cache: StageStateCache::new(num_nodes),
+            rhs_scratch: RhsScratch::new(num_cvs, num_lvs),
         })
     }
 
@@ -379,6 +487,10 @@ impl TransientNetworkModel {
 
     pub fn rhs_snapshot_time_s(&self) -> f64 {
         self.rhs_timing.rhs_snapshot_time_s
+    }
+
+    pub fn rhs_component_build_time_s(&self) -> f64 {
+        self.rhs_timing.rhs_component_build_time_s
     }
 
     pub fn rhs_state_reconstruct_time_s(&self) -> f64 {
@@ -559,16 +671,54 @@ impl TransientNetworkModel {
         })
     }
 
+    /// Ensure execution plan is built and matches current valve positions.
+    /// Returns true if plan was rebuilt, false if reused.
+    fn ensure_execution_plan(&mut self, time_s: f64) -> Result<bool, String> {
+        // Compute current valve positions from schedules
+        let mut current_valve_positions = HashMap::new();
+        for component in &self.system.components {
+            if let ComponentKind::Valve { position, .. } = &component.kind {
+                let mut pos = *position;
+                if let Some(events) = self.schedules.valve_events.get(&component.id) {
+                    if let Some(value) = last_event_value(events, time_s) {
+                        pos = value;
+                    }
+                }
+                current_valve_positions.insert(component.id.clone(), pos);
+            }
+        }
+
+        // Check if we can reuse existing plan
+        let can_reuse = if let Some(ref plan) = self.execution_plan {
+            current_valve_positions == plan.current_valve_positions
+        } else {
+            false
+        };
+
+        if can_reuse {
+            return Ok(false);
+        }
+
+        // Build new execution plan (metadata only)
+        self.execution_plan = Some(TransientExecutionPlan {
+            current_valve_positions,
+        });
+
+        Ok(true)
+    }
+
     fn solve_snapshot(&mut self, time_s: f64, state: &TransientState) -> SimResult<Snapshot> {
         let _timer = Timer::start("transient_snapshot_solve");
         let mut surrogate_time_s = 0.0;
 
-        let mut problem = SteadyProblem::new(
-            &self.runtime.graph,
-            self.fluid_model.as_ref(),
-            self.composition.clone(),
-        );
+        // Ensure execution plan is up-to-date (tracks valve positions)
+        let component_build_started = Instant::now();
+        let plan_rebuilt = self
+            .ensure_execution_plan(time_s)
+            .map_err(|e| SimError::Backend { message: e })?;
 
+        // Rebuild components from execution plan
+        // Note: We still need to rebuild because SteadyProblem takes ownership
         let mut components_for_problem = build_components_with_schedules(
             &self.system,
             &self.runtime.comp_id_map,
@@ -576,6 +726,19 @@ impl TransientNetworkModel {
             time_s,
         )
         .map_err(|e| SimError::Backend { message: e })?;
+
+        self.rhs_timing.rhs_component_build_time_s +=
+            component_build_started.elapsed().as_secs_f64();
+
+        if plan_rebuilt && self.log_mode.is_verbose() {
+            eprintln!("[PLAN] Detected valve position change at t={:.6}s", time_s);
+        }
+
+        let mut problem = SteadyProblem::new(
+            &self.runtime.graph,
+            self.fluid_model.as_ref(),
+            self.composition.clone(),
+        );
 
         for (comp_id, component) in components_for_problem.drain() {
             problem.add_component(comp_id, component)?;
@@ -1517,6 +1680,9 @@ impl TransientModel for TransientNetworkModel {
     fn rhs(&mut self, t: f64, x: &Self::State) -> SimResult<Self::State> {
         self.rhs_timing.rhs_calls += 1;
 
+        // Clear state cache at start of each RHS evaluation
+        self.state_cache.clear();
+
         let snapshot_started = Instant::now();
         let snapshot = self.solve_snapshot(t, x)?;
         self.rhs_timing.rhs_snapshot_time_s += snapshot_started.elapsed().as_secs_f64();
@@ -1531,31 +1697,24 @@ impl TransientModel for TransientNetworkModel {
         self.solver_linearch_iter_count += solution.timing_stats.linearch_iter_count;
 
         let state_reconstruct_started = Instant::now();
-        let mut node_states = Vec::new();
+        // Reconstruct states with caching to avoid redundant CoolProp calls
         for (i, (&p, &h)) in solution
             .pressures
             .iter()
             .zip(solution.enthalpies.iter())
             .enumerate()
         {
-            let state = self.create_state_with_fallback(p, h, i)?;
-            node_states.push(state);
+            if self.state_cache.get(i).is_none() {
+                let state = self.create_state_with_fallback(p, h, i)?;
+                self.state_cache.insert(i, state);
+            }
         }
         self.rhs_timing.rhs_state_reconstruct_time_s +=
             state_reconstruct_started.elapsed().as_secs_f64();
 
+        // Clear and reuse scratch buffers
         let buffer_init_started = Instant::now();
-        // Control Volume storage dynamics
-        let mut dm_in = vec![0.0; self.control_volumes.len()];
-        let mut dm_out = vec![0.0; self.control_volumes.len()];
-        let mut dmh_in = vec![0.0; self.control_volumes.len()];
-        let mut dmh_out = vec![0.0; self.control_volumes.len()];
-
-        // LineVolume storage dynamics
-        let mut lv_dm_in = vec![0.0; self.line_volumes.len()];
-        let mut lv_dm_out = vec![0.0; self.line_volumes.len()];
-        let mut lv_dmh_in = vec![0.0; self.line_volumes.len()];
-        let mut lv_dmh_out = vec![0.0; self.line_volumes.len()];
+        self.rhs_scratch.clear();
         self.rhs_timing.rhs_buffer_init_time_s += buffer_init_started.elapsed().as_secs_f64();
 
         let routing_started = Instant::now();
@@ -1567,8 +1726,19 @@ impl TransientModel for TransientNetworkModel {
                     message: format!("Missing flow route metadata for component {:?}", comp_id),
                 })?;
 
-            let inlet_state = &node_states[route.inlet_idx];
-            let outlet_state = &node_states[route.outlet_idx];
+            // Use cached states instead of rebuilding
+            let inlet_state =
+                self.state_cache
+                    .get(route.inlet_idx)
+                    .ok_or_else(|| SimError::Backend {
+                        message: format!("Inlet state not cached for route {:?}", comp_id),
+                    })?;
+            let outlet_state =
+                self.state_cache
+                    .get(route.outlet_idx)
+                    .ok_or_else(|| SimError::Backend {
+                        message: format!("Outlet state not cached for route {:?}", comp_id),
+                    })?;
 
             let component_model =
                 snapshot
@@ -1583,13 +1753,14 @@ impl TransientModel for TransientNetworkModel {
             if *mdot >= 0.0 {
                 // Flow from inlet to outlet
                 if let Some(cv_idx) = route.inlet_cv_idx {
-                    dm_out[cv_idx] += *mdot;
-                    dmh_out[cv_idx] += *mdot * x.control_volumes[cv_idx].h_j_per_kg;
+                    self.rhs_scratch.cv_dm_out[cv_idx] += *mdot;
+                    self.rhs_scratch.cv_dmh_out[cv_idx] +=
+                        *mdot * x.control_volumes[cv_idx].h_j_per_kg;
                 }
 
                 // LineVolume storage: inlet side
                 if let Some(lv_idx) = line_volume_idx {
-                    lv_dm_in[lv_idx] += *mdot;
+                    self.rhs_scratch.lv_dm_in[lv_idx] += *mdot;
                     let h_in = self
                         .fluid_model
                         .h(inlet_state)
@@ -1599,7 +1770,7 @@ impl TransientModel for TransientNetworkModel {
                                 comp_id, e
                             ),
                         })?;
-                    lv_dmh_in[lv_idx] += *mdot * h_in;
+                    self.rhs_scratch.lv_dmh_in[lv_idx] += *mdot * h_in;
                 }
 
                 if let Some(cv_idx) = route.outlet_cv_idx {
@@ -1613,27 +1784,29 @@ impl TransientModel for TransientNetworkModel {
                             message: format!("Component {:?} enthalpy failed: {}", comp_id, e),
                         })?;
 
-                    dm_in[cv_idx] += *mdot;
-                    dmh_in[cv_idx] += *mdot * h_out;
+                    self.rhs_scratch.cv_dm_in[cv_idx] += *mdot;
+                    self.rhs_scratch.cv_dmh_in[cv_idx] += *mdot * h_out;
                 }
 
                 // LineVolume storage: outlet side
                 if let Some(lv_idx) = line_volume_idx {
-                    lv_dm_out[lv_idx] += *mdot;
-                    lv_dmh_out[lv_idx] += *mdot * x.line_volumes[lv_idx].h_j_per_kg;
+                    self.rhs_scratch.lv_dm_out[lv_idx] += *mdot;
+                    self.rhs_scratch.lv_dmh_out[lv_idx] +=
+                        *mdot * x.line_volumes[lv_idx].h_j_per_kg;
                 }
             } else {
                 let mdot_abs = -(*mdot);
 
                 // Flow from outlet to inlet
                 if let Some(cv_idx) = route.outlet_cv_idx {
-                    dm_out[cv_idx] += mdot_abs;
-                    dmh_out[cv_idx] += mdot_abs * x.control_volumes[cv_idx].h_j_per_kg;
+                    self.rhs_scratch.cv_dm_out[cv_idx] += mdot_abs;
+                    self.rhs_scratch.cv_dmh_out[cv_idx] +=
+                        mdot_abs * x.control_volumes[cv_idx].h_j_per_kg;
                 }
 
                 // LineVolume storage: outlet side (reverse flow)
                 if let Some(lv_idx) = line_volume_idx {
-                    lv_dm_in[lv_idx] += mdot_abs;
+                    self.rhs_scratch.lv_dm_in[lv_idx] += mdot_abs;
                     let h_in = self
                         .fluid_model
                         .h(outlet_state)
@@ -1643,7 +1816,7 @@ impl TransientModel for TransientNetworkModel {
                                 comp_id, e
                             ),
                         })?;
-                    lv_dmh_in[lv_idx] += mdot_abs * h_in;
+                    self.rhs_scratch.lv_dmh_in[lv_idx] += mdot_abs * h_in;
                 }
 
                 if let Some(cv_idx) = route.inlet_cv_idx {
@@ -1657,14 +1830,15 @@ impl TransientModel for TransientNetworkModel {
                             message: format!("Component {:?} enthalpy failed: {}", comp_id, e),
                         })?;
 
-                    dm_in[cv_idx] += mdot_abs;
-                    dmh_in[cv_idx] += mdot_abs * h_out;
+                    self.rhs_scratch.cv_dm_in[cv_idx] += mdot_abs;
+                    self.rhs_scratch.cv_dmh_in[cv_idx] += mdot_abs * h_out;
                 }
 
                 // LineVolume storage: inlet side (reverse flow)
                 if let Some(lv_idx) = line_volume_idx {
-                    lv_dm_out[lv_idx] += mdot_abs;
-                    lv_dmh_out[lv_idx] += mdot_abs * x.line_volumes[lv_idx].h_j_per_kg;
+                    self.rhs_scratch.lv_dm_out[lv_idx] += mdot_abs;
+                    self.rhs_scratch.lv_dmh_out[lv_idx] +=
+                        mdot_abs * x.line_volumes[lv_idx].h_j_per_kg;
                 }
             }
         }
@@ -1680,8 +1854,8 @@ impl TransientModel for TransientNetworkModel {
                     what: "control volume mass must be positive",
                 });
             }
-            let dm = dm_in[i] - dm_out[i];
-            let dmh = dmh_in[i] - dmh_out[i];
+            let dm = self.rhs_scratch.cv_dm_in[i] - self.rhs_scratch.cv_dm_out[i];
+            let dmh = self.rhs_scratch.cv_dmh_in[i] - self.rhs_scratch.cv_dmh_out[i];
             let h_dot = (dmh - x.control_volumes[i].h_j_per_kg * dm) / m;
 
             cv_deriv.push(ControlVolumeState {
@@ -1701,8 +1875,8 @@ impl TransientModel for TransientNetworkModel {
                     what: "line volume mass must be positive",
                 });
             }
-            let dm = lv_dm_in[i] - lv_dm_out[i];
-            let dmh = lv_dmh_in[i] - lv_dmh_out[i];
+            let dm = self.rhs_scratch.lv_dm_in[i] - self.rhs_scratch.lv_dm_out[i];
+            let dmh = self.rhs_scratch.lv_dmh_in[i] - self.rhs_scratch.lv_dmh_out[i];
             let h_dot = (dmh - x.line_volumes[i].h_j_per_kg * dm) / m;
 
             lv_deriv.push(ControlVolumeState {
