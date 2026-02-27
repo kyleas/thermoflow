@@ -187,8 +187,8 @@ impl ThermoflowApp {
             while let Ok(msg) = worker.progress_rx.try_recv() {
                 match msg {
                     WorkerMessage::Progress(event) => {
-                        self.latest_progress = Some(event.clone());
-                        self.last_worker_message = event.message;
+                        self.last_worker_message = event.message.clone();
+                        self.latest_progress = Some(event);
                     }
                     WorkerMessage::Complete {
                         run_id,
@@ -196,18 +196,26 @@ impl ThermoflowApp {
                         timing,
                     } => {
                         self.latest_progress = None;
+                        let init = timing
+                            .initialization_strategy
+                            .clone()
+                            .unwrap_or_else(|| "auto".to_string());
                         self.last_worker_message = Some(format!(
-                            "Run {}: {} | total {:.3}s (compile {:.3}s, solve {:.3}s, save {:.3}s)",
+                            "Run {}: {} | init={} | total {:.3}s (compile {:.3}s, build {:.3}s, solve {:.3}s, save {:.3}s, cutbacks {}, fallback {})",
                             if loaded_from_cache {
                                 "loaded from cache"
                             } else {
                                 "completed"
                             },
                             run_id,
+                            init,
                             timing.total_time_s,
                             timing.compile_time_s,
+                            timing.build_time_s,
                             timing.solve_time_s,
-                            timing.save_time_s
+                            timing.save_time_s,
+                            timing.transient_cutback_retries,
+                            timing.transient_fallback_uses
                         ));
                         run_id_result = Some(run_id);
                         completed = true;
@@ -828,8 +836,11 @@ impl eframe::App for ThermoflowApp {
                     ui.heading("Run Status");
 
                     if let Some(progress) = &self.latest_progress {
-                        ui.label(format!("Stage: {:?}", progress.stage));
+                        ui.label(format!("Stage: {}", progress.stage.label()));
                         ui.label(format!("Elapsed: {:.2}s", progress.elapsed_wall_s));
+                        if let Some(strategy) = &progress.initialization_strategy {
+                            ui.label(format!("Initialization: {}", strategy));
+                        }
 
                         if let Some(t) = &progress.transient {
                             ui.add(

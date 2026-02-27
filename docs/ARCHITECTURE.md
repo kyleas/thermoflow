@@ -166,7 +166,7 @@ Within that project, users switch between **workspaces**â€”specialized UI viewsâ
 | **tf-graph** | Topology | Graph structure for fluid networks |
 | **tf-project** | Schema | Project file format and validation |
 | **tf-fluids** | Properties | Thermodynamic/transport models; RefProp wrapper |
-| **tf-components** | Component models | Orifice, pipe, pump, turbine, valve physics |
+| **tf-components** | Component models | Orifice, pipe, pump, turbine, valve, LineVolume physics |
 | **tf-solver** | Steady solution | Linear/nonlinear system solving; steady-state simulator |
 | **tf-sim** | Transient | Integration schemes; transient simulator |
 | **tf-results** | Storage | Run manifests, time-series record storage, caching |
@@ -225,6 +225,23 @@ All simulation is either:
 
 No workspace duplicates solving logic. Both CLI and GUI call **tf-app::run_service::ensure_run()**, which handles caching, execution, and result storage uniformly for steady and transient modes.
 
+Current supported transient envelope includes:
+- Single-CV fixed-component venting to atmosphere
+- Fixed-topology multi-control-volume transients (no timed component schedules)
+
+Timed valve opening/closing schedules remain explicitly unsupported and are rejected in validation.
+
+### 5.3.1 Initialization Strategy
+
+The solver uses configurable **initialization strategies** to control startup behavior and regularization:
+
+- **Strict**: Minimal regularization, tight tolerances; used for steady-state and single-CV transients
+- **Relaxed**: Aggressive regularization, relaxed tolerances; used for multi-CV transients and LineVolume components
+
+Initialization strategy is automatically determined based on system characteristics (CV count, LineVolume presence). The selected strategy is visible in diagnostics and timing summaries for troubleshooting startup issues.
+
+Strategies control Newton solver parameters: weak-flow regularization scale, enthalpy residual tolerances, and initial guess generation.
+
 ### 5.4 CLI and GUI Parity
 
 Both frontends (tf-cli, tf-ui) use identical services:
@@ -252,7 +269,14 @@ Run execution progress and timing are emitted from backend shared services:
 - `tf_app::run_service::RunTimingSummary`
 
 Steady runs report stage + iteration/residual information (no fake percent).
-Transient runs report simulated-time progress fraction (`sim_time / t_end`) and cutback retry counts.
+Transient runs report simulated-time progress fraction (`sim_time / t_end`), step count, and cutback retry counts.
+
+`RunTimingSummary` includes:
+- Initialization strategy (`Strict`/`Relaxed`)
+- Compile/build/solve/save/total timings
+- Steady iterations and residual (steady mode)
+- Step count, cutbacks, fallback uses (transient mode)
+- Real-fluid attempts/successes and surrogate update counts (transient diagnostics)
 
 `tf-cli` and `tf-ui` consume this shared API and must not implement separate execution progress logic.
 

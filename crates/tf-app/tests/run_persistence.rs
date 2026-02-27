@@ -21,6 +21,7 @@ fn steady_run_persists_in_project_store() {
         options: RunOptions {
             use_cache: false,
             solver_version: "0.1.0".to_string(),
+            initialization_strategy: None,
         },
     };
 

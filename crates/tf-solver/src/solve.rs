@@ -1,6 +1,7 @@
 //! High-level solver interface.
 
 use crate::error::{SolverError, SolverResult};
+use crate::initialization::InitializationStrategy;
 use crate::jacobian::finite_difference_jacobian;
 use crate::newton::{NewtonConfig, newton_solve_with_validator};
 use crate::problem::SteadyProblem;
@@ -65,6 +66,7 @@ pub fn solve(
         None,
         &StrictPolicy,
         None,
+        None,
     )
 }
 
@@ -81,6 +83,7 @@ pub fn solve_with_progress(
         None,
         &StrictPolicy,
         Some(observer),
+        None,
     )
 }
 
@@ -97,6 +100,7 @@ pub fn solve_with_active(
         Some(active_components),
         &StrictPolicy,
         None,
+        None,
     )
 }
 
@@ -112,7 +116,15 @@ pub fn solve_with_policy(
     initial_guess_solution: Option<&SteadySolution>,
     policy: &dyn ThermoStatePolicy,
 ) -> SolverResult<SteadySolution> {
-    solve_internal(problem, config, initial_guess_solution, None, policy, None)
+    solve_internal(
+        problem,
+        config,
+        initial_guess_solution,
+        None,
+        policy,
+        None,
+        None,
+    )
 }
 
 /// Solve with active components filter and custom thermo state policy.
@@ -130,6 +142,68 @@ pub fn solve_with_active_and_policy(
         Some(active_components),
         policy,
         None,
+        None,
+    )
+}
+
+/// Solve with explicit initialization strategy.
+///
+/// The strategy controls startup behavior:
+/// - Strict: Direct initialization with minimal regularization
+/// - Relaxed: Conservative startup with weak-flow regularization and enthalpy clamping
+///
+/// If both `config` and `strategy` are provided, `config` takes precedence.
+/// If neither is provided, defaults to Strict strategy.
+pub fn solve_with_strategy(
+    problem: &mut SteadyProblem,
+    strategy: InitializationStrategy,
+    initial_guess_solution: Option<&SteadySolution>,
+) -> SolverResult<SteadySolution> {
+    solve_internal(
+        problem,
+        None,
+        initial_guess_solution,
+        None,
+        &StrictPolicy,
+        None,
+        Some(strategy),
+    )
+}
+
+/// Solve with strategy and progress reporting.
+pub fn solve_with_strategy_and_progress(
+    problem: &mut SteadyProblem,
+    strategy: InitializationStrategy,
+    initial_guess_solution: Option<&SteadySolution>,
+    observer: &mut dyn FnMut(SolveProgressEvent),
+) -> SolverResult<SteadySolution> {
+    solve_internal(
+        problem,
+        None,
+        initial_guess_solution,
+        None,
+        &StrictPolicy,
+        Some(observer),
+        Some(strategy),
+    )
+}
+
+/// Solve with strategy, policy, and progress reporting.
+pub fn solve_with_strategy_policy_and_progress(
+    problem: &mut SteadyProblem,
+    strategy: InitializationStrategy,
+    initial_guess_solution: Option<&SteadySolution>,
+    policy: &dyn ThermoStatePolicy,
+    observer: &mut dyn FnMut(SolveProgressEvent),
+) -> SolverResult<SteadySolution> {
+    solve_internal(
+        problem,
+        None,
+        initial_guess_solution,
+        None,
+        policy,
+        Some(observer),
+        Some(strategy),
     )
 }
 
@@ -140,6 +214,7 @@ fn solve_internal(
     active_components: Option<&HashSet<CompId>>,
     policy: &dyn ThermoStatePolicy,
     mut observer: Option<&mut dyn FnMut(SolveProgressEvent)>,
+    initialization_strategy: Option<InitializationStrategy>,
 ) -> SolverResult<SteadySolution> {
     // Validate problem
     problem.validate()?;
@@ -237,8 +312,14 @@ fn solve_internal(
     } else {
         initial_guess(problem)?
     };
-
-    let cfg = config.unwrap_or_default();
+    // Determine NewtonConfig: explicit config takes precedence, then strategy, then default
+    let cfg = if let Some(c) = config {
+        c
+    } else if let Some(strategy) = initialization_strategy {
+        strategy.to_newton_config()
+    } else {
+        InitializationStrategy::default().to_newton_config()
+    };
 
     let var_kinds = {
         let mut kinds = Vec::with_capacity(problem.num_free_vars());

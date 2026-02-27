@@ -1,0 +1,101 @@
+version: 2
+name: "Two CVs Connected via LineVolume"
+# Demonstrates LineVolume connecting two control volumes
+# Shows distributed storage with multiple CVs and intermediate storage
+systems:
+  - id: s1
+    name: "Two-CV System with LineVolume"
+    fluid:
+      composition:
+        type: Pure
+        species: Nitrogen
+    nodes:
+      - id: n_upstream
+        name: "Upstream Tank"
+        kind:
+          type: ControlVolume
+          volume_m3: 0.1
+          initial:
+            mode: PT
+            p_pa: 1500000.0
+            t_k: 300.0
+      - id: n_downstream
+        name: "Downstream Tank"
+        kind:
+          type: ControlVolume
+          volume_m3: 0.05
+          initial:
+            mode: PT
+            p_pa: 500000.0
+            t_k: 300.0
+      - id: n_ambient
+        name: "Ambient"
+        kind:
+          type: Atmosphere
+          pressure_pa: 101325.0
+          temperature_k: 300.0
+    components:
+      - id: lv1
+        name: "Connecting  Line"
+        kind:
+          type: LineVolume
+          volume_m3: 0.002
+          cd: 0.75
+          area_m2: 0.0003
+        from_node_id: n_upstream
+        to_node_id: n_downstream
+      - id: orifice1
+        name: "Vent Orifice"
+        kind:
+          type: Orifice
+          cd: 0.8
+          area_m2: 0.0002
+          treat_as_gas: true
+        from_node_id: n_downstream
+        to_node_id: n_ambient
+    boundaries: []
+    schedules: []
+modules: []
+layouts:
+  - system_id: s1
+    nodes:
+      - node_id: n_upstream
+        x: 150.0
+        y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+      - node_id: n_downstream
+        x: 400.0
+        y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+      - node_id: n_ambient
+        x: 600.0
+        y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+    edges:
+      - component_id: lv1
+        points:
+          - x: 150.0
+            y: 200.0
+          - x: 400.0
+            y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+      - component_id: orifice1
+        points:
+          - x: 400.0
+            y: 200.0
+          - x: 600.0
+            y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+    overlay:
+      show_pressure: true
+      show_temperature: true
+      show_enthalpy: false
+      show_density: false
+      show_mass_flow: true
+runs:
+  runs: []

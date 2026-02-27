@@ -6,7 +6,7 @@ use uom::si::f64::{
     MassRate as UomMassRate, Power as UomPower, Pressure as UomPressure, Ratio as UomRatio,
     TemperatureInterval as UomTemperatureInterval,
     ThermodynamicTemperature as UomThermodynamicTemperature, Time as UomTime,
-    Velocity as UomVelocity,
+    Velocity as UomVelocity, Volume as UomVolume,
 };
 
 // Public canonical unit types (SI, f64)
@@ -25,6 +25,7 @@ pub type TempInterval = UomTemperatureInterval;
 pub type Temperature = UomThermodynamicTemperature;
 pub type Time = UomTime;
 pub type Velocity = UomVelocity;
+pub type Volume = UomVolume;
 
 #[inline]
 pub fn pa(v: f64) -> Pressure {

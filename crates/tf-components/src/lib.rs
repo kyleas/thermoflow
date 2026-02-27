@@ -46,6 +46,7 @@
 
 pub mod common;
 pub mod error;
+pub mod line_volume;
 pub mod orifice;
 pub mod pipe;
 pub mod pump;
@@ -55,6 +56,7 @@ pub mod valve;
 
 // Re-exports
 pub use error::{ComponentError, ComponentResult};
+pub use line_volume::LineVolume;
 pub use orifice::Orifice;
 pub use pipe::Pipe;
 pub use pump::Pump;

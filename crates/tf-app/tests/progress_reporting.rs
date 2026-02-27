@@ -24,6 +24,7 @@ fn steady_progress_and_timing_are_reported() {
         options: RunOptions {
             use_cache: false,
             solver_version: "0.1.0".to_string(),
+            initialization_strategy: None,
         },
     };
 
@@ -46,6 +47,10 @@ fn steady_progress_and_timing_are_reported() {
     // so iteration/residual details may be absent. Stage visibility is still required.
     assert!(response.timing.total_time_s > 0.0);
     assert!(response.timing.solve_time_s > 0.0);
+    assert_eq!(
+        response.timing.initialization_strategy.as_deref(),
+        Some("Strict")
+    );
 
     let (_manifest, records) = load_run(project_path, &response.run_id).expect("run should load");
     let summary = query::get_run_summary(&records).expect("summary should load");
@@ -65,6 +70,7 @@ fn transient_progress_and_timing_are_reported() {
         options: RunOptions {
             use_cache: false,
             solver_version: "0.1.0".to_string(),
+            initialization_strategy: None,
         },
     };
 
@@ -88,4 +94,16 @@ fn transient_progress_and_timing_are_reported() {
     assert!(response.timing.total_time_s > 0.0);
     assert!(response.timing.solve_time_s > 0.0);
     assert!(response.timing.transient_steps > 0);
+    assert!(response.timing.build_time_s >= 0.0);
+    assert_eq!(
+        response.timing.initialization_strategy.as_deref(),
+        Some("Strict")
+    );
+    assert!(response.timing.transient_real_fluid_attempts > 0);
+    assert_eq!(
+        response.timing.transient_real_fluid_attempts,
+        response.timing.transient_real_fluid_successes,
+        "supported transient should stay on real-fluid path"
+    );
+    assert!(response.timing.transient_surrogate_populations > 0);
 }

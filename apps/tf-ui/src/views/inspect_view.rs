@@ -534,6 +534,7 @@ impl InspectView {
                 ComponentKind::Pipe { .. } => "Pipe",
                 ComponentKind::Pump { .. } => "Pump",
                 ComponentKind::Turbine { .. } => "Turbine",
+                ComponentKind::LineVolume { .. } => "LineVolume",
             };
             ui.label(type_name);
         });
@@ -795,6 +796,39 @@ impl InspectView {
                     .changed();
 
                 changed |= ui.checkbox(treat_as_gas, "Treat as Gas").changed();
+            }
+            ComponentKind::LineVolume {
+                volume_m3,
+                cd,
+                area_m2,
+            } => {
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Volume (m³):");
+                        ui.add(
+                            egui::DragValue::new(volume_m3)
+                                .speed(0.001)
+                                .range(1e-6..=100.0),
+                        )
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Cd (0 = lossless):");
+                        ui.add(egui::DragValue::new(cd).speed(0.01).range(0.0..=1.0))
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Area (m²):");
+                        ui.add(egui::DragValue::new(area_m2).speed(0.0001).range(0.0..=1.0))
+                    })
+                    .inner
+                    .changed();
             }
         }
 

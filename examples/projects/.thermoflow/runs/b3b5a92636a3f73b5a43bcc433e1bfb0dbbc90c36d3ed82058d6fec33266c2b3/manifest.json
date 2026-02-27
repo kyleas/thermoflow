@@ -1,0 +1,12 @@
+{
+  "run_id": "b3b5a92636a3f73b5a43bcc433e1bfb0dbbc90c36d3ed82058d6fec33266c2b3",
+  "system_id": "s1",
+  "timestamp": "2026-02-27T20:11:36.008241100+00:00",
+  "run_type": {
+    "type": "Transient",
+    "dt_s": 0.02,
+    "t_end_s": 0.2,
+    "steps": 12
+  },
+  "solver_version": "0.1.0"
+}

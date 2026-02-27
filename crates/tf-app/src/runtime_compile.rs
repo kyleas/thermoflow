@@ -1,8 +1,8 @@
 //! Runtime compilation of SystemDef into executable models.
 
 use std::collections::HashMap;
-use tf_components::{Orifice, Pipe, Pump, Turbine, TwoPortComponent, Valve, ValveLaw};
-use tf_core::units::{Area, DynVisc, Pressure, Temperature};
+use tf_components::{LineVolume, Orifice, Pipe, Pump, Turbine, TwoPortComponent, Valve, ValveLaw};
+use tf_core::units::{Area, DynVisc, Pressure, Temperature, Volume};
 use tf_fluids::{Composition, CoolPropModel, FluidModel, Species};
 use tf_graph::GraphBuilder;
 use tf_project::schema::{
@@ -12,6 +12,7 @@ use uom::si::area::square_meter;
 use uom::si::dynamic_viscosity::pascal_second;
 use uom::si::pressure::pascal;
 use uom::si::thermodynamic_temperature::kelvin;
+use uom::si::volume::cubic_meter;
 
 use crate::error::{AppError, AppResult};
 
@@ -161,6 +162,23 @@ pub fn build_components(
                 Turbine::new(component.name.clone(), *cd, area(*area_m2), *eta)
                     .map_err(|e| AppError::Compile(format!("Turbine creation error: {}", e)))?,
             ),
+            ComponentKind::LineVolume {
+                volume_m3,
+                cd,
+                area_m2,
+            } => {
+                let volume = Volume::new::<cubic_meter>(*volume_m3);
+                if *cd > 0.0 && *area_m2 > 0.0 {
+                    Box::new(LineVolume::new_with_resistance(
+                        component.name.clone(),
+                        volume,
+                        *cd,
+                        area(*area_m2),
+                    ))
+                } else {
+                    Box::new(LineVolume::new_lossless(component.name.clone(), volume))
+                }
+            }
         };
         components.insert(comp_id, boxed);
     }

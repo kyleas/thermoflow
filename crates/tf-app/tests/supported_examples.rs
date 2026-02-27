@@ -8,6 +8,8 @@ fn supported_examples_validate() {
         "../../examples/projects/01_orifice_steady.yaml",
         "../../examples/projects/02_tank_blowdown_transient.yaml",
         "../../examples/projects/03_simple_vent_transient.yaml",
+        "../../examples/projects/04_two_cv_series_vent_transient.yaml",
+        "../../examples/projects/05_two_cv_pipe_vent_transient.yaml",
     ];
 
     for path in supported {

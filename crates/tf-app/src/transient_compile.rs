@@ -3,12 +3,13 @@
 //! This module handles:
 //! - Converting a system definition into a transient runtime model
 //! - Building control volumes and initial conditions
+//! - Building line volume storage elements
 //! - Parsing and applying scheduled boundary/component changes
 //! - Integration with tf-sim for time-stepping
 
 use std::collections::{HashMap, HashSet};
 
-use tf_components::{Orifice, Pipe, Pump, Turbine, TwoPortComponent, Valve, ValveLaw};
+use tf_components::{LineVolume, Orifice, Pipe, Pump, Turbine, TwoPortComponent, Valve, ValveLaw};
 use tf_core::timing::Timer;
 use tf_core::units::{kgps, m, pa, Area, DynVisc, Pressure, Temperature};
 use tf_core::{CompId, NodeId};
@@ -35,11 +36,13 @@ use crate::AppError;
 #[derive(Clone, Debug)]
 pub struct TransientState {
     pub control_volumes: Vec<ControlVolumeState>,
+    pub line_volumes: Vec<ControlVolumeState>, // LineVolume storage (same structure as CV)
 }
 
 impl TransientState {
+    #[allow(dead_code)]
     fn len(&self) -> usize {
-        self.control_volumes.len()
+        self.control_volumes.len() + self.line_volumes.len()
     }
 }
 
@@ -50,6 +53,25 @@ struct ScheduleData {
     boundary_temperature_events: HashMap<String, Vec<(f64, f64)>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransientLogMode {
+    Summary,
+    Verbose,
+}
+
+impl TransientLogMode {
+    fn from_env() -> Self {
+        match std::env::var("THERMOFLOW_TRANSIENT_LOG") {
+            Ok(value) if value.eq_ignore_ascii_case("verbose") => Self::Verbose,
+            _ => Self::Summary,
+        }
+    }
+
+    fn is_verbose(self) -> bool {
+        matches!(self, Self::Verbose)
+    }
+}
+
 pub struct TransientNetworkModel {
     system: SystemDef,
     runtime: SystemRuntime,
@@ -58,11 +80,21 @@ pub struct TransientNetworkModel {
     control_volumes: Vec<ControlVolume>,
     cv_node_ids: Vec<NodeId>,
     cv_index_by_node: HashMap<NodeId, usize>,
+    // LineVolume storage elements (component-based storage, not node-based)
+    line_volumes: Vec<ControlVolume>, // Uses CV mechanics for storage
+    #[allow(dead_code)]
+    lv_comp_ids: Vec<CompId>, // Component IDs of LineVolume components
+    lv_index_by_comp: HashMap<CompId, usize>, // Map comp_id -> line_volume index
     initial_state: TransientState,
     schedules: ScheduleData,
+    has_dynamic_schedules: bool,
     last_steady_solution: Option<SteadySolution>,
     last_cv_pressure: Vec<Option<Pressure>>,
     last_cv_enthalpy: Vec<Option<f64>>, // CoolProp-compatible h when fallback is active
+    #[allow(dead_code)]
+    last_lv_pressure: Vec<Option<Pressure>>, // LineVolume internal pressures
+    #[allow(dead_code)]
+    last_lv_enthalpy: Vec<Option<f64>>, // LineVolume internal enthalpies
     solution_cache: HashMap<i64, SteadySolution>,
     last_active_components: HashSet<CompId>,
     last_valve_positions: HashMap<String, f64>, // Track valve positions for continuation
@@ -71,6 +103,8 @@ pub struct TransientNetworkModel {
     // Thermodynamic fallback surrogates: one per control volume for robustness
     // Built from the last valid real-fluid state; used when CoolProp fails mid-solve
     cv_surrogate_models: Vec<Option<FrozenPropertySurrogate>>,
+    #[allow(dead_code)]
+    lv_surrogate_models: Vec<Option<FrozenPropertySurrogate>>, // Surrogates for LineVolumes
 
     // Diagnostic counters for observability
     real_fluid_attempts: usize, // How many times we tried real-fluid state creation
@@ -82,6 +116,7 @@ pub struct TransientNetworkModel {
     junction_thermal_state: JunctionThermalState,
     junction_thermal_config: JunctionThermalConfig,
     junction_node_ids: Vec<NodeId>, // Track which nodes are junctions (not CVs)
+    log_mode: TransientLogMode,
 }
 
 struct Snapshot {
@@ -90,18 +125,62 @@ struct Snapshot {
 }
 
 impl TransientNetworkModel {
-    pub fn new(system: &SystemDef, runtime: &SystemRuntime) -> Result<Self, AppError> {
+    pub fn new(
+        system: &SystemDef,
+        runtime: &SystemRuntime,
+        _initialization_strategy: tf_solver::InitializationStrategy,
+    ) -> Result<Self, AppError> {
         let fluid_model = runtime_compile::build_fluid_model(&system.fluid)?;
         let composition = runtime.composition.clone();
+        let log_mode = TransientLogMode::from_env();
 
         let schedules = build_schedule_data(&system.schedules);
+        let has_dynamic_schedules = !schedules.valve_events.is_empty()
+            || !schedules.boundary_pressure_events.is_empty()
+            || !schedules.boundary_temperature_events.is_empty();
 
-        let (control_volumes, cv_node_ids, cv_index_by_node, initial_state) =
+        let (control_volumes, cv_node_ids, cv_index_by_node, cv_initial_states) =
             build_control_volumes(system, runtime, fluid_model.as_ref(), composition.clone())
                 .map_err(|e| AppError::TransientCompile { message: e })?;
 
-        let last_cv_pressure = vec![None; control_volumes.len()];
-        let last_cv_enthalpy = vec![None; control_volumes.len()];
+        // Build LineVolume storage elements
+        let (line_volumes, lv_comp_ids, lv_index_by_comp, lv_initial_states) =
+            build_line_volume_storage(system, runtime, fluid_model.as_ref(), composition.clone())
+                .map_err(|e| AppError::TransientCompile { message: e })?;
+
+        let initial_state = TransientState {
+            control_volumes: cv_initial_states,
+            line_volumes: lv_initial_states,
+        };
+
+        let mut last_cv_pressure = vec![None; control_volumes.len()];
+        let mut last_cv_enthalpy = vec![None; control_volumes.len()];
+
+        for (idx, cv) in control_volumes.iter().enumerate() {
+            if let Some(cv_state) = initial_state.control_volumes.get(idx) {
+                if let Ok((p_seed, h_seed)) =
+                    cv.state_ph_boundary(fluid_model.as_ref(), cv_state, None)
+                {
+                    last_cv_pressure[idx] = Some(p_seed);
+                    last_cv_enthalpy[idx] = Some(h_seed);
+                }
+            }
+        }
+
+        // Initialize LineVolume pressure/enthalpy hints
+        let mut last_lv_pressure = vec![None; line_volumes.len()];
+        let mut last_lv_enthalpy = vec![None; line_volumes.len()];
+
+        for (idx, lv) in line_volumes.iter().enumerate() {
+            if let Some(lv_state) = initial_state.line_volumes.get(idx) {
+                if let Ok((p_seed, h_seed)) =
+                    lv.state_ph_boundary(fluid_model.as_ref(), lv_state, None)
+                {
+                    last_lv_pressure[idx] = Some(p_seed);
+                    last_lv_enthalpy[idx] = Some(h_seed);
+                }
+            }
+        }
 
         // Initialize valve positions from component definitions
         let mut last_valve_positions = HashMap::new();
@@ -113,6 +192,7 @@ impl TransientNetworkModel {
 
         // Initialize surrogate models (empty until first valid state)
         let cv_surrogate_models = vec![None; control_volumes.len()];
+        let lv_surrogate_models = vec![None; line_volumes.len()];
 
         // Identify junction nodes (explicit Junction kind only; Atmosphere is fixed)
         let junction_node_ids: Vec<NodeId> = system
@@ -124,11 +204,14 @@ impl TransientNetworkModel {
             })
             .collect();
 
-        eprintln!(
-            "[TRANSIENT] Junction thermal regularization: {} junction nodes, {} CV nodes",
-            junction_node_ids.len(),
-            cv_node_ids.len()
-        );
+        if log_mode.is_verbose() {
+            eprintln!(
+                "[TRANSIENT] Model initialized: {} CV nodes, {} LineVolume components, {} junction nodes",
+                cv_node_ids.len(),
+                lv_comp_ids.len(),
+                junction_node_ids.len()
+            );
+        }
 
         Ok(Self {
             system: system.clone(),
@@ -143,16 +226,23 @@ impl TransientNetworkModel {
             control_volumes,
             cv_node_ids,
             cv_index_by_node,
+            line_volumes,
+            lv_comp_ids,
+            lv_index_by_comp,
             initial_state,
             schedules,
+            has_dynamic_schedules,
             last_steady_solution: None,
             last_cv_pressure,
             last_cv_enthalpy,
+            last_lv_pressure,
+            last_lv_enthalpy,
             solution_cache: HashMap::new(),
             last_active_components: HashSet::new(),
             last_valve_positions,
             last_time: 0.0,
             cv_surrogate_models,
+            lv_surrogate_models,
             real_fluid_attempts: 0,
             real_fluid_successes: 0,
             surrogate_populations: 0,
@@ -160,12 +250,25 @@ impl TransientNetworkModel {
             junction_thermal_state: JunctionThermalState::new(),
             junction_thermal_config: JunctionThermalConfig::default(),
             junction_node_ids,
+            log_mode,
         })
     }
 
     /// Number of times fallback surrogate state creation was used.
     pub fn fallback_uses(&self) -> usize {
         self.fallback_uses
+    }
+
+    pub fn real_fluid_attempts(&self) -> usize {
+        self.real_fluid_attempts
+    }
+
+    pub fn real_fluid_successes(&self) -> usize {
+        self.real_fluid_successes
+    }
+
+    pub fn surrogate_populations(&self) -> usize {
+        self.surrogate_populations
     }
 
     /// Print transient simulation diagnostics.
@@ -294,9 +397,10 @@ impl TransientNetworkModel {
             }
         }
 
-        let mut edge_values = Vec::new();
+        let mass_flow_by_comp: HashMap<_, _> = solution.mass_flows.iter().copied().collect();
+        let mut edge_values = Vec::with_capacity(self.runtime.comp_id_map.len());
         for (comp_id_str, &comp_idx) in &self.runtime.comp_id_map {
-            if let Some((_, mdot)) = solution.mass_flows.iter().find(|(id, _)| *id == comp_idx) {
+            if let Some(mdot) = mass_flow_by_comp.get(&comp_idx) {
                 edge_values.push(EdgeValueSnapshot {
                     component_id: comp_id_str.clone(),
                     mdot_kg_s: Some(*mdot),
@@ -334,15 +438,26 @@ impl TransientNetworkModel {
             problem.add_component(comp_id, component)?;
         }
 
-        let boundary_defs = apply_boundary_schedules(&self.system, &self.schedules, time_s);
-        let boundaries = runtime_compile::parse_boundaries_with_atmosphere(
-            &self.system,
-            &boundary_defs,
-            &self.runtime.node_id_map,
-        )
-        .map_err(|e| SimError::Backend {
-            message: format!("Failed to parse boundaries: {}", e),
-        })?;
+        let boundaries = if self.has_dynamic_schedules {
+            let boundary_defs = apply_boundary_schedules(&self.system, &self.schedules, time_s);
+            runtime_compile::parse_boundaries_with_atmosphere(
+                &self.system,
+                &boundary_defs,
+                &self.runtime.node_id_map,
+            )
+            .map_err(|e| SimError::Backend {
+                message: format!("Failed to parse boundaries: {}", e),
+            })?
+        } else {
+            runtime_compile::parse_boundaries_with_atmosphere(
+                &self.system,
+                &self.system.boundaries,
+                &self.runtime.node_id_map,
+            )
+            .map_err(|e| SimError::Backend {
+                message: format!("Failed to parse static boundaries: {}", e),
+            })?
+        };
 
         for (node_id, bc) in &boundaries {
             match bc {
@@ -363,13 +478,15 @@ impl TransientNetworkModel {
             let cv_state = &state.control_volumes[idx];
             let p_hint = self.last_cv_pressure[idx];
 
-            eprintln!(
-                "[DEBUG] CV '{}' at t={:.4}s: trying state_ph_boundary with rho={:.3}, h={:.1}",
-                cv.name,
-                time_s,
-                cv.density(cv_state),
-                cv_state.h_j_per_kg
-            );
+            if self.log_mode.is_verbose() {
+                eprintln!(
+                    "[DEBUG] CV '{}' at t={:.4}s: trying state_ph_boundary with rho={:.3}, h={:.1}",
+                    cv.name,
+                    time_s,
+                    cv.density(cv_state),
+                    cv_state.h_j_per_kg
+                );
+            }
 
             // Try real-fluid boundary computation
             match cv.state_ph_boundary(self.fluid_model.as_ref(), cv_state, p_hint) {
@@ -489,57 +606,61 @@ impl TransientNetworkModel {
         }
 
         // Apply junction node boundaries using lagged enthalpies (transient thermal regularization)
-        // This avoids exact algebraic enthalpy closure at junctions during difficult transitions.
-        for &junction_node_id in &self.junction_node_ids {
-            // Check if this junction is explicitly bounded by external boundaries
-            let has_external_bc = boundaries.contains_key(&junction_node_id);
+        // This avoids exact algebraic enthalpy closure during difficult transitions, but we
+        // intentionally do not anchor junction enthalpy on the very first snapshot solve.
+        let apply_junction_anchor = self.last_steady_solution.is_some() || time_s > 1.0e-12;
+        if apply_junction_anchor {
+            for &junction_node_id in &self.junction_node_ids {
+                // Check if this junction is explicitly bounded by external boundaries
+                let has_external_bc = boundaries.contains_key(&junction_node_id);
 
-            if !has_external_bc {
-                // Prefer CV-adjacent enthalpy if available to avoid stale junction states.
-                let mut cv_h_sum = 0.0;
-                let mut cv_count = 0usize;
-                for comp_info in self.runtime.graph.components() {
-                    let comp_id = comp_info.id;
-                    let inlet = self.runtime.graph.comp_inlet_node(comp_id);
-                    let outlet = self.runtime.graph.comp_outlet_node(comp_id);
+                if !has_external_bc {
+                    // Prefer CV-adjacent enthalpy if available to avoid stale junction states.
+                    let mut cv_h_sum = 0.0;
+                    let mut cv_count = 0usize;
+                    for comp_info in self.runtime.graph.components() {
+                        let comp_id = comp_info.id;
+                        let inlet = self.runtime.graph.comp_inlet_node(comp_id);
+                        let outlet = self.runtime.graph.comp_outlet_node(comp_id);
 
-                    let other = if inlet == Some(junction_node_id) {
-                        outlet
-                    } else if outlet == Some(junction_node_id) {
-                        inlet
+                        let other = if inlet == Some(junction_node_id) {
+                            outlet
+                        } else if outlet == Some(junction_node_id) {
+                            inlet
+                        } else {
+                            None
+                        };
+
+                        if let Some(other_node) = other {
+                            if let Some(&cv_idx) = self.cv_index_by_node.get(&other_node) {
+                                if let Some(cv_state) = state.control_volumes.get(cv_idx) {
+                                    cv_h_sum += cv_state.h_j_per_kg;
+                                    cv_count += 1;
+                                }
+                            }
+                        }
+                    }
+
+                    let h_cv_avg = if cv_count > 0 {
+                        Some(cv_h_sum / (cv_count as f64))
                     } else {
                         None
                     };
 
-                    if let Some(other_node) = other {
-                        if let Some(&cv_idx) = self.cv_index_by_node.get(&other_node) {
-                            if let Some(cv_state) = state.control_volumes.get(cv_idx) {
-                                cv_h_sum += cv_state.h_j_per_kg;
-                                cv_count += 1;
-                            }
-                        }
+                    let h_lagged = self
+                        .junction_thermal_state
+                        .get_lagged_enthalpy(junction_node_id);
+                    let h_use = h_cv_avg.or(h_lagged);
+
+                    if let Some(h_use) = h_use {
+                        // Junction pressure will still be solved algebraically, but enthalpy is anchored
+                        problem.set_enthalpy_bc(junction_node_id, h_use)?;
+
+                        eprintln!(
+                            "[JUNCTION] Node {:?} using lagged h={:.1} J/kg for t={:.4}s",
+                            junction_node_id, h_use, time_s
+                        );
                     }
-                }
-
-                let h_cv_avg = if cv_count > 0 {
-                    Some(cv_h_sum / (cv_count as f64))
-                } else {
-                    None
-                };
-
-                let h_lagged = self
-                    .junction_thermal_state
-                    .get_lagged_enthalpy(junction_node_id);
-                let h_use = h_cv_avg.or(h_lagged);
-
-                if let Some(h_use) = h_use {
-                    // Junction pressure will still be solved algebraically, but enthalpy is anchored
-                    problem.set_enthalpy_bc(junction_node_id, h_use)?;
-
-                    eprintln!(
-                        "[JUNCTION] Node {:?} using lagged h={:.1} J/kg for t={:.4}s",
-                        junction_node_id, h_use, time_s
-                    );
                 }
             }
         }
@@ -704,7 +825,9 @@ impl TransientNetworkModel {
                 .or(self.last_steady_solution.as_ref())
         };
 
-        // Use adaptive solver config for mode transitions
+        let is_startup_solve = self.last_steady_solution.is_none() && time_s <= 1.0e-12;
+
+        // Use adaptive solver config for mode transitions and first-step startup.
         let solver_config = if is_mode_transition {
             Some(tf_solver::NewtonConfig {
                 max_iterations: 250,
@@ -714,6 +837,19 @@ impl TransientNetworkModel {
                 enthalpy_total_rel: 2.0,
                 weak_flow_mdot: 0.5,
                 weak_flow_enthalpy_scale: 0.25,
+                ..Default::default()
+            })
+        } else if is_startup_solve {
+            Some(tf_solver::NewtonConfig {
+                max_iterations: 300,
+                line_search_beta: 0.4,
+                max_line_search_iters: 40,
+                enthalpy_delta_abs: 8.0e5,
+                enthalpy_delta_rel: 0.8,
+                enthalpy_total_abs: 2.5e6,
+                enthalpy_total_rel: 4.0,
+                weak_flow_mdot: 0.5,
+                weak_flow_enthalpy_scale: 0.4,
                 ..Default::default()
             })
         } else {
@@ -763,16 +899,42 @@ impl TransientNetworkModel {
                         }
                     }
                 }
-                // Only log summary, not every node
-                if populated_count > 0 {
-                    eprintln!(
-                        "[SURROGATE] Populated {} node surrogates from warm-start",
-                        populated_count
-                    );
+            } else {
+                for (&cv_node_id, (&p_opt, &h_opt)) in self.cv_node_ids.iter().zip(
+                    self.last_cv_pressure
+                        .iter()
+                        .zip(self.last_cv_enthalpy.iter()),
+                ) {
+                    let (Some(p), Some(h)) = (p_opt, h_opt) else {
+                        continue;
+                    };
+
+                    let node_idx = cv_node_id.index() as usize;
+                    if let Ok(state) = self
+                        .fluid_model
+                        .state(StateInput::PH { p, h }, self.composition.clone())
+                    {
+                        let t = state.temperature();
+                        let rho = self.fluid_model.rho(&state).map(|r| r.value).unwrap_or(1.0);
+                        let cp = self.fluid_model.cp(&state).unwrap_or(1000.0);
+                        let molar_mass = self.composition.molar_mass();
+                        fallback_policy.update_surrogate(
+                            node_idx,
+                            crate::transient_fallback_policy::SurrogateSample {
+                                p,
+                                t: t.value,
+                                h,
+                                rho,
+                                cp,
+                                molar_mass,
+                            },
+                        );
+                        populated_count += 1;
+                    }
                 }
             }
 
-            fallback_policy
+            (fallback_policy, populated_count)
         };
 
         // Apply continuation strategy if needed
@@ -814,7 +976,16 @@ impl TransientNetworkModel {
                     ..Default::default()
                 });
 
-                let mut fallback_policy = make_policy(warm_start);
+                let (mut fallback_policy, populated_count) = make_policy(warm_start);
+                if populated_count > 0 {
+                    self.surrogate_populations += populated_count;
+                    if self.log_mode.is_verbose() {
+                        eprintln!(
+                            "[SURROGATE] Populated {} node surrogates from warm-start",
+                            populated_count
+                        );
+                    }
+                }
                 let mut current_solution = warm_start.cloned();
                 let mut retry_failed = false;
 
@@ -961,8 +1132,10 @@ impl TransientNetworkModel {
                             }
                         }
                     }
-                    if updated_count > 0 && substep == substeps {
-                        // Only log at final substep to reduce verbosity
+                    if updated_count > 0 {
+                        self.surrogate_populations += updated_count;
+                    }
+                    if updated_count > 0 && substep == substeps && self.log_mode.is_verbose() {
                         eprintln!(
                             "[SURROGATE] Updated {} surrogates from final substep",
                             updated_count
@@ -981,13 +1154,15 @@ impl TransientNetworkModel {
 
                 if retry < MAX_CONTINUATION_RETRIES {
                     let next_substeps = ((substeps as f64) * 1.5).ceil() as usize;
-                    eprintln!(
-                        "[CUTBACK] Continuation retry {}/{}: substeps {} -> {}",
-                        retry + 1,
-                        MAX_CONTINUATION_RETRIES,
-                        substeps,
-                        next_substeps
-                    );
+                    if self.log_mode.is_verbose() {
+                        eprintln!(
+                            "[CUTBACK] Continuation retry {}/{}: substeps {} -> {}",
+                            retry + 1,
+                            MAX_CONTINUATION_RETRIES,
+                            substeps,
+                            next_substeps
+                        );
+                    }
                     substeps = next_substeps;
                 }
             }
@@ -1000,7 +1175,16 @@ impl TransientNetworkModel {
                 ),
             })?
         } else {
-            let fallback_policy = make_policy(warm_start);
+            let (fallback_policy, populated_count) = make_policy(warm_start);
+            if populated_count > 0 {
+                self.surrogate_populations += populated_count;
+                if self.log_mode.is_verbose() {
+                    eprintln!(
+                        "[SURROGATE] Seeded {} node surrogates from CV startup states",
+                        populated_count
+                    );
+                }
+            }
             tf_solver::solve_with_active_and_policy(
                 &mut problem,
                 solver_config,
@@ -1217,10 +1401,17 @@ impl TransientModel for TransientNetworkModel {
             node_states.push(state);
         }
 
+        // Control Volume storage dynamics
         let mut dm_in = vec![0.0; self.control_volumes.len()];
         let mut dm_out = vec![0.0; self.control_volumes.len()];
         let mut dmh_in = vec![0.0; self.control_volumes.len()];
         let mut dmh_out = vec![0.0; self.control_volumes.len()];
+
+        // LineVolume storage dynamics
+        let mut lv_dm_in = vec![0.0; self.line_volumes.len()];
+        let mut lv_dm_out = vec![0.0; self.line_volumes.len()];
+        let mut lv_dmh_in = vec![0.0; self.line_volumes.len()];
+        let mut lv_dmh_out = vec![0.0; self.line_volumes.len()];
 
         for (comp_id, mdot) in &solution.mass_flows {
             let inlet_node = self
@@ -1252,11 +1443,32 @@ impl TransientModel for TransientNetworkModel {
                         message: format!("Component model not found for {:?}", comp_id),
                     })?;
 
+            // Check if this component is a LineVolume with its own storage
+            let is_line_volume = self.lv_index_by_comp.contains_key(comp_id);
+
             if *mdot >= 0.0 {
                 // Flow from inlet to outlet
                 if let Some(&cv_idx) = self.cv_index_by_node.get(&inlet_node) {
                     dm_out[cv_idx] += *mdot;
                     dmh_out[cv_idx] += *mdot * x.control_volumes[cv_idx].h_j_per_kg;
+                }
+
+                // LineVolume storage: inlet side
+                if is_line_volume {
+                    if let Some(&lv_idx) = self.lv_index_by_comp.get(comp_id) {
+                        lv_dm_in[lv_idx] += *mdot;
+                        // Enthalpy entering the LineVolume equals inlet node enthalpy
+                        let h_in =
+                            self.fluid_model
+                                .h(inlet_state)
+                                .map_err(|e| SimError::Backend {
+                                    message: format!(
+                                        "Failed to get inlet enthalpy for LineVolume {:?}: {}",
+                                        comp_id, e
+                                    ),
+                                })?;
+                        lv_dmh_in[lv_idx] += *mdot * h_in;
+                    }
                 }
 
                 if let Some(&cv_idx) = self.cv_index_by_node.get(&outlet_node) {
@@ -1273,6 +1485,15 @@ impl TransientModel for TransientNetworkModel {
                     dm_in[cv_idx] += *mdot;
                     dmh_in[cv_idx] += *mdot * h_out;
                 }
+
+                // LineVolume storage: outlet side
+                if is_line_volume {
+                    if let Some(&lv_idx) = self.lv_index_by_comp.get(comp_id) {
+                        // Mass and enthalpy leaving the LineVolume
+                        lv_dm_out[lv_idx] += *mdot;
+                        lv_dmh_out[lv_idx] += *mdot * x.line_volumes[lv_idx].h_j_per_kg;
+                    }
+                }
             } else {
                 let mdot_abs = -(*mdot);
 
@@ -1280,6 +1501,24 @@ impl TransientModel for TransientNetworkModel {
                 if let Some(&cv_idx) = self.cv_index_by_node.get(&outlet_node) {
                     dm_out[cv_idx] += mdot_abs;
                     dmh_out[cv_idx] += mdot_abs * x.control_volumes[cv_idx].h_j_per_kg;
+                }
+
+                // LineVolume storage: outlet side (reverse flow)
+                if is_line_volume {
+                    if let Some(&lv_idx) = self.lv_index_by_comp.get(comp_id) {
+                        lv_dm_in[lv_idx] += mdot_abs;
+                        // Enthalpy entering the LineVolume from outlet side
+                        let h_in =
+                            self.fluid_model
+                                .h(outlet_state)
+                                .map_err(|e| SimError::Backend {
+                                    message: format!(
+                                        "Failed to get outlet enthalpy for LineVolume {:?}: {}",
+                                        comp_id, e
+                                    ),
+                                })?;
+                        lv_dmh_in[lv_idx] += mdot_abs * h_in;
+                    }
                 }
 
                 if let Some(&cv_idx) = self.cv_index_by_node.get(&inlet_node) {
@@ -1296,10 +1535,20 @@ impl TransientModel for TransientNetworkModel {
                     dm_in[cv_idx] += mdot_abs;
                     dmh_in[cv_idx] += mdot_abs * h_out;
                 }
+
+                // LineVolume storage: inlet side (reverse flow)
+                if is_line_volume {
+                    if let Some(&lv_idx) = self.lv_index_by_comp.get(comp_id) {
+                        // Mass and enthalpy leaving the LineVolume from inlet side
+                        lv_dm_out[lv_idx] += mdot_abs;
+                        lv_dmh_out[lv_idx] += mdot_abs * x.line_volumes[lv_idx].h_j_per_kg;
+                    }
+                }
             }
         }
 
-        let mut deriv = Vec::new();
+        // Compute CV derivatives
+        let mut cv_deriv = Vec::new();
         for i in 0..self.control_volumes.len() {
             let m = x.control_volumes[i].m_kg;
             if m <= 0.0 {
@@ -1311,40 +1560,80 @@ impl TransientModel for TransientNetworkModel {
             let dmh = dmh_in[i] - dmh_out[i];
             let h_dot = (dmh - x.control_volumes[i].h_j_per_kg * dm) / m;
 
-            deriv.push(ControlVolumeState {
+            cv_deriv.push(ControlVolumeState {
+                m_kg: dm,
+                h_j_per_kg: h_dot,
+            });
+        }
+
+        // Compute LineVolume derivatives
+        let mut lv_deriv = Vec::new();
+        for i in 0..self.line_volumes.len() {
+            let m = x.line_volumes[i].m_kg;
+            if m <= 0.0 {
+                return Err(SimError::NonPhysical {
+                    what: "line volume mass must be positive",
+                });
+            }
+            let dm = lv_dm_in[i] - lv_dm_out[i];
+            let dmh = lv_dmh_in[i] - lv_dmh_out[i];
+            let h_dot = (dmh - x.line_volumes[i].h_j_per_kg * dm) / m;
+
+            lv_deriv.push(ControlVolumeState {
                 m_kg: dm,
                 h_j_per_kg: h_dot,
             });
         }
 
         Ok(TransientState {
-            control_volumes: deriv,
+            control_volumes: cv_deriv,
+            line_volumes: lv_deriv,
         })
     }
 
     fn add(&self, a: &Self::State, b: &Self::State) -> Self::State {
-        let mut out = Vec::with_capacity(a.len());
-        for i in 0..a.len() {
-            out.push(ControlVolumeState {
+        let mut cv_out = Vec::with_capacity(a.control_volumes.len());
+        for i in 0..a.control_volumes.len() {
+            cv_out.push(ControlVolumeState {
                 m_kg: a.control_volumes[i].m_kg + b.control_volumes[i].m_kg,
                 h_j_per_kg: a.control_volumes[i].h_j_per_kg + b.control_volumes[i].h_j_per_kg,
             });
         }
+
+        let mut lv_out = Vec::with_capacity(a.line_volumes.len());
+        for i in 0..a.line_volumes.len() {
+            lv_out.push(ControlVolumeState {
+                m_kg: a.line_volumes[i].m_kg + b.line_volumes[i].m_kg,
+                h_j_per_kg: a.line_volumes[i].h_j_per_kg + b.line_volumes[i].h_j_per_kg,
+            });
+        }
+
         TransientState {
-            control_volumes: out,
+            control_volumes: cv_out,
+            line_volumes: lv_out,
         }
     }
 
     fn scale(&self, a: &Self::State, scale: f64) -> Self::State {
-        let mut out = Vec::with_capacity(a.len());
+        let mut cv_out = Vec::with_capacity(a.control_volumes.len());
         for cv in &a.control_volumes {
-            out.push(ControlVolumeState {
+            cv_out.push(ControlVolumeState {
                 m_kg: cv.m_kg * scale,
                 h_j_per_kg: cv.h_j_per_kg * scale,
             });
         }
+
+        let mut lv_out = Vec::with_capacity(a.line_volumes.len());
+        for lv in &a.line_volumes {
+            lv_out.push(ControlVolumeState {
+                m_kg: lv.m_kg * scale,
+                h_j_per_kg: lv.h_j_per_kg * scale,
+            });
+        }
+
         TransientState {
-            control_volumes: out,
+            control_volumes: cv_out,
+            line_volumes: lv_out,
         }
     }
 }
@@ -1354,7 +1643,17 @@ type BuildControlVolumesResult = Result<
         Vec<ControlVolume>,
         Vec<NodeId>,
         HashMap<NodeId, usize>,
-        TransientState,
+        Vec<ControlVolumeState>,
+    ),
+    String,
+>;
+
+type BuildLineVolumeStorageResult = Result<
+    (
+        Vec<ControlVolume>,
+        Vec<CompId>,
+        HashMap<CompId, usize>,
+        Vec<ControlVolumeState>,
     ),
     String,
 >;
@@ -1392,10 +1691,112 @@ fn build_control_volumes(
         control_volumes,
         cv_node_ids,
         cv_index_by_node,
-        TransientState {
-            control_volumes: initial_states,
-        },
+        initial_states,
     ))
+}
+
+/// Build storage elements for LineVolume components.
+///
+/// LineVolume components are two-port components with internal finite storage.
+/// This function creates ControlVolume-like storage for each LineVolume component
+/// and initializes their state based on connected inlet node conditions.
+fn build_line_volume_storage(
+    system: &SystemDef,
+    runtime: &SystemRuntime,
+    fluid: &dyn FluidModel,
+    composition: Composition,
+) -> BuildLineVolumeStorageResult {
+    let mut line_volumes = Vec::new();
+    let mut lv_comp_ids = Vec::new();
+    let mut lv_index_by_comp = HashMap::new();
+    let mut initial_states = Vec::new();
+
+    for component in &system.components {
+        if let ComponentKind::LineVolume { volume_m3, .. } = &component.kind {
+            // Create ControlVolume-like storage for this LineVolume
+            let lv = ControlVolume::new(
+                format!("{}_storage", component.name),
+                *volume_m3,
+                composition.clone(),
+            )
+            .map_err(|e| format!("LineVolume storage error: {}", e))?;
+
+            // Initialize state from inlet node conditions if possible
+            let (init_p, init_t) = match find_inlet_node_conditions(system, component) {
+                Some((p, t)) => (p, t),
+                None => {
+                    // Fallback to atmospheric conditions
+                    eprintln!(
+                        "[LINEVOLUME] Warning: {} has no valid inlet CV, initializing with atmospheric conditions",
+                        component.name
+                    );
+                    (101325.0, 300.0)
+                }
+            };
+
+            let state_default = fluid
+                .state(
+                    StateInput::PT {
+                        p: pa(init_p),
+                        t: Temperature::new::<kelvin>(init_t),
+                    },
+                    composition.clone(),
+                )
+                .map_err(|e| format!("LineVolume initial state creation failed: {}", e))?;
+
+            let rho = fluid
+                .rho(&state_default)
+                .map_err(|e| format!("LineVolume density computation failed: {}", e))?;
+
+            let h = fluid
+                .h(&state_default)
+                .map_err(|e| format!("LineVolume enthalpy computation failed: {}", e))?;
+
+            let m_kg = rho.value * volume_m3;
+            let h_j_per_kg = h;
+
+            let comp_id = *runtime
+                .comp_id_map
+                .get(&component.id)
+                .ok_or_else(|| format!("Component not found: {}", component.id))?;
+
+            lv_index_by_comp.insert(comp_id, line_volumes.len());
+            line_volumes.push(lv);
+            lv_comp_ids.push(comp_id);
+            initial_states.push(ControlVolumeState { m_kg, h_j_per_kg });
+        }
+    }
+
+    Ok((line_volumes, lv_comp_ids, lv_index_by_comp, initial_states))
+}
+
+/// Find inlet node (P, T) conditions for a LineVolume component.
+/// Returns Some((p_pa, t_k)) if inlet is a ControlVolume or Atmosphere with initial conditions.
+fn find_inlet_node_conditions(system: &SystemDef, component: &ComponentDef) -> Option<(f64, f64)> {
+    let inlet_node = system
+        .nodes
+        .iter()
+        .find(|n| n.id == component.from_node_id)?;
+
+    match &inlet_node.kind {
+        NodeKind::ControlVolume { initial, .. } => {
+            // Extract P and T from initial conditions
+            let mode_str = initial.mode.as_ref()?;
+            match mode_str.as_str() {
+                "PT" => {
+                    let p = initial.p_pa?;
+                    let t = initial.t_k?;
+                    Some((p, t))
+                }
+                _ => None,
+            }
+        }
+        NodeKind::Atmosphere {
+            pressure_pa,
+            temperature_k,
+        } => Some((*pressure_pa, *temperature_k)),
+        _ => None,
+    }
 }
 
 fn initial_state_from_def(
@@ -1758,6 +2159,7 @@ fn component_is_active(component: &ComponentDef, schedules: &ScheduleData, time_
         ComponentKind::Pipe { .. } => true,
         ComponentKind::Pump { area_m2, .. } => *area_m2 > 0.0,
         ComponentKind::Turbine { area_m2, .. } => *area_m2 > 0.0,
+        ComponentKind::LineVolume { .. } => true,
     }
 }
 
@@ -1864,6 +2266,26 @@ fn build_components_with_valve_overrides(
                 Turbine::new(component.name.clone(), *cd, area_from_m2(*area_m2), *eta)
                     .map_err(|e| format!("Turbine creation error: {}", e))?,
             ),
+            ComponentKind::LineVolume {
+                volume_m3,
+                cd,
+                area_m2,
+            } => {
+                use tf_core::units::Volume;
+                use uom::si::volume::cubic_meter;
+
+                let vol = Volume::new::<cubic_meter>(*volume_m3);
+                if *cd > 0.0 {
+                    Box::new(LineVolume::new_with_resistance(
+                        component.name.clone(),
+                        vol,
+                        *cd,
+                        area_from_m2(*area_m2),
+                    ))
+                } else {
+                    Box::new(LineVolume::new_lossless(component.name.clone(), vol))
+                }
+            }
         };
 
         components.insert(comp_id, boxed);

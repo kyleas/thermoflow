@@ -142,6 +142,13 @@ pub enum ComponentKind {
         eta: f64,
         treat_as_gas: bool,
     },
+    LineVolume {
+        volume_m3: f64,
+        #[serde(default)]
+        cd: f64,
+        #[serde(default)]
+        area_m2: f64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

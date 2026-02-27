@@ -718,6 +718,27 @@ fn build_components_with_schedules(
                 Turbine::new(component.name.clone(), *cd, area_from_m2(*area_m2), *eta)
                     .map_err(|e| format!("Turbine creation error: {}", e))?,
             ),
+            ComponentKind::LineVolume {
+                volume_m3,
+                cd,
+                area_m2,
+            } => {
+                use tf_components::LineVolume;
+                use tf_core::units::Volume;
+                use uom::si::volume::cubic_meter;
+
+                let vol = Volume::new::<cubic_meter>(*volume_m3);
+                if *cd > 0.0 {
+                    Box::new(LineVolume::new_with_resistance(
+                        component.name.clone(),
+                        vol,
+                        *cd,
+                        area_from_m2(*area_m2),
+                    ))
+                } else {
+                    Box::new(LineVolume::new_lossless(component.name.clone(), vol))
+                }
+            }
         };
 
         components.insert(comp_id, boxed);

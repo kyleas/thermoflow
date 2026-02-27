@@ -1,0 +1,100 @@
+version: 2
+name: "Two-CV Series Vent (Fixed Topology)"
+systems:
+  - id: s1
+    name: "Two-CV Series Vent"
+    fluid:
+      composition:
+        type: Pure
+        species: Nitrogen
+    nodes:
+      - id: n_cv1
+        name: "Upstream CV"
+        kind:
+          type: ControlVolume
+          volume_m3: 0.03
+          initial:
+            mode: PT
+            p_pa: 800000.0
+            t_k: 305.0
+      - id: n_cv2
+        name: "Downstream CV"
+        kind:
+          type: ControlVolume
+          volume_m3: 0.04
+          initial:
+            mode: PT
+            p_pa: 350000.0
+            t_k: 300.0
+      - id: n_ambient
+        name: "Ambient"
+        kind:
+          type: Atmosphere
+          pressure_pa: 101325.0
+          temperature_k: 300.0
+    components:
+      - id: v12
+        name: "Inter-CV Valve"
+        kind:
+          type: Valve
+          cd: 0.85
+          area_max_m2: 0.00008
+          position: 0.75
+          law:
+            type: Linear
+          treat_as_gas: true
+        from_node_id: n_cv1
+        to_node_id: n_cv2
+      - id: o2
+        name: "Outlet Orifice"
+        kind:
+          type: Orifice
+          cd: 0.8
+          area_m2: 0.00006
+          treat_as_gas: true
+        from_node_id: n_cv2
+        to_node_id: n_ambient
+    boundaries: []
+    schedules: []
+modules: []
+layouts:
+  - system_id: s1
+    nodes:
+      - node_id: n_cv1
+        x: 160.0
+        y: 220.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+      - node_id: n_cv2
+        x: 360.0
+        y: 220.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+      - node_id: n_ambient
+        x: 560.0
+        y: 220.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+    edges:
+      - component_id: v12
+        points:
+          - x: 160.0
+            y: 220.0
+          - x: 360.0
+            y: 220.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+      - component_id: o2
+        points:
+          - x: 360.0
+            y: 220.0
+          - x: 560.0
+            y: 220.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+    overlay:
+      show_pressure: true
+      show_temperature: true
+      show_enthalpy: false
+      show_density: false
+      show_mass_flow: true

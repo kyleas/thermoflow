@@ -1,0 +1,70 @@
+version: 2
+name: "LineVolume Simple Vent"
+# Demonstrates LineVolume providing storage between CV and atmosphere
+# Simplified configuration: Tank → LineVolume → Atmosphere
+systems:
+  - id: s1
+    name: "LineVolume Vent System"
+    fluid:
+      composition:
+        type: Pure
+        species: Nitrogen
+    nodes:
+      - id: n_tank
+        name: "Source Tank"
+        kind:
+          type: ControlVolume
+          volume_m3: 0.05
+          initial:
+            mode: PT
+            p_pa: 800000.0
+            t_k: 300.0
+      - id: n_ambient
+        name: "Ambient"
+        kind:
+          type: Atmosphere
+          pressure_pa: 101325.0
+          temperature_k: 300.0
+    components:
+      - id: lv1
+        name: "Line with Storage"
+        kind:
+          type: LineVolume
+          volume_m3: 0.001
+          cd: 0.75
+          area_m2: 0.0002
+        from_node_id: n_tank
+        to_node_id: n_ambient
+    boundaries: []
+    schedules: []
+modules: []
+layouts:
+  - system_id: s1
+    nodes:
+      - node_id: n_tank
+        x: 200.0
+        y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+      - node_id: n_ambient
+        x: 400.0
+        y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+    edges:
+      - component_id: lv1
+        points:
+          - x: 200.0
+            y: 200.0
+          - x: 400.0
+            y: 200.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+    overlay:
+      show_pressure: true
+      show_temperature: true
+      show_enthalpy: false
+      show_density: false
+      show_mass_flow: true
+runs:
+  runs: []

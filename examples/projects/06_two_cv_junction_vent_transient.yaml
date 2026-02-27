@@ -1,0 +1,129 @@
+version: 2
+name: "Two-CV Junction Vent (Fixed Topology)"
+systems:
+  - id: s1
+    name: "Two-CV Junction Vent"
+    fluid:
+      composition:
+        type: Pure
+        species: Nitrogen
+    nodes:
+      - id: n_cv_a
+        name: "CV A"
+        kind:
+          type: ControlVolume
+          volume_m3: 0.018
+          initial:
+            mode: PT
+            p_pa: 700000.0
+            t_k: 303.0
+      - id: n_cv_b
+        name: "CV B"
+        kind:
+          type: ControlVolume
+          volume_m3: 0.02
+          initial:
+            mode: PT
+            p_pa: 500000.0
+            t_k: 300.0
+      - id: n_mix
+        name: "Mix Junction"
+        kind:
+          type: Junction
+      - id: n_ambient
+        name: "Ambient"
+        kind:
+          type: Atmosphere
+          pressure_pa: 101325.0
+          temperature_k: 300.0
+    components:
+      - id: v_a
+        name: "A-to-Junction Valve"
+        kind:
+          type: Valve
+          cd: 0.84
+          area_max_m2: 0.00006
+          position: 0.7
+          law:
+            type: Linear
+          treat_as_gas: true
+        from_node_id: n_cv_a
+        to_node_id: n_mix
+      - id: v_b
+        name: "B-to-Junction Valve"
+        kind:
+          type: Valve
+          cd: 0.8
+          area_max_m2: 0.00005
+          position: 0.65
+          law:
+            type: Linear
+          treat_as_gas: true
+        from_node_id: n_cv_b
+        to_node_id: n_mix
+      - id: o_mix
+        name: "Junction Outlet Orifice"
+        kind:
+          type: Orifice
+          cd: 0.82
+          area_m2: 0.00009
+          treat_as_gas: true
+        from_node_id: n_mix
+        to_node_id: n_ambient
+    boundaries: []
+    schedules: []
+modules: []
+layouts:
+  - system_id: s1
+    nodes:
+      - node_id: n_cv_a
+        x: 130.0
+        y: 190.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+      - node_id: n_cv_b
+        x: 130.0
+        y: 290.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+      - node_id: n_mix
+        x: 360.0
+        y: 240.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+      - node_id: n_ambient
+        x: 570.0
+        y: 240.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+    edges:
+      - component_id: v_a
+        points:
+          - x: 130.0
+            y: 190.0
+          - x: 360.0
+            y: 240.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+      - component_id: v_b
+        points:
+          - x: 130.0
+            y: 290.0
+          - x: 360.0
+            y: 240.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+      - component_id: o_mix
+        points:
+          - x: 360.0
+            y: 240.0
+          - x: 570.0
+            y: 240.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+    overlay:
+      show_pressure: true
+      show_temperature: true
+      show_enthalpy: false
+      show_density: false
+      show_mass_flow: true

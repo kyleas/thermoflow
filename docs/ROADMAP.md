@@ -57,6 +57,10 @@ Thermoflow evolves in seven phases, each building on the previous to add capabil
 
 **Status**: ✅ Complete (including transient unification)
 
+**Stabilization update (2026-02-27)**:
+- Fixed-topology multi-control-volume transient benchmarks are now part of the supported envelope
+- Timed valve schedules remain explicitly unsupported
+
 ---
 
 ## Phase 3: P&ID Editor Maturity

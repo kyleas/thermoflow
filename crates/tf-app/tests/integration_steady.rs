@@ -35,6 +35,7 @@ fn test_steady_simulation_orifice() {
         options: RunOptions {
             use_cache: true,
             solver_version: "0.1.0".to_string(),
+            initialization_strategy: None,
         },
     };
 
@@ -120,6 +121,7 @@ fn test_steady_simulation_with_no_cache() {
         options: RunOptions {
             use_cache: true,
             solver_version: "0.1.0".to_string(),
+            initialization_strategy: None,
         },
     };
 
@@ -135,6 +137,7 @@ fn test_steady_simulation_with_no_cache() {
         options: RunOptions {
             use_cache: false,
             solver_version: "0.1.0".to_string(),
+            initialization_strategy: None,
         },
     };
 

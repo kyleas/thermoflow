@@ -76,6 +76,7 @@ impl RunWorker {
             options: RunOptions {
                 use_cache: use_cached,
                 solver_version: "0.1.0".to_string(),
+                initialization_strategy: None,
             },
         };
 

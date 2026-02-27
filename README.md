@@ -37,12 +37,50 @@ cargo run -p tf-cli -- systems examples/projects/01_orifice_steady.yaml
 # Run a steady-state simulation
 cargo run -p tf-cli -- run steady examples/projects/01_orifice_steady.yaml s1
 
+# Run a transient simulation
+cargo run -p tf-cli -- run transient --dt 0.1 --t-end 1.0 examples/projects/03_simple_vent_transient.yaml s1
+
 # List cached runs
 cargo run -p tf-cli -- runs examples/projects/01_orifice_steady.yaml s1
 
 # Export a result as CSV
 cargo run -p tf-cli -- export-series examples/projects/01_orifice_steady.yaml <run-id> n1 pressure -o result.csv
 ```
+
+### Run Observability
+
+CLI and GUI runs report:
+- current phase/stage (compile, build, solve, save)
+- initialization strategy (`Strict` or `Relaxed`)
+- steady iteration/residual or transient simulated-time progress
+- cutbacks/retries and fallback usage (transient)
+- final timing breakdown with phase percentages
+- real-fluid attempts/successes and surrogate update counts for transient diagnostics
+
+For transient debugging, set `THERMOFLOW_TRANSIENT_LOG=verbose` to enable detailed per-step traces.
+
+### Benchmarking
+
+Run the performance baseline suite to measure and compare workflow execution times:
+
+```bash
+cargo build -p tf-bench --release
+target/release/tf-bench.exe
+```
+
+This will:
+1. Execute each supported example 5 times with fresh computation (no cache)
+2. Collect wall-clock timing metrics for compile, build, solve, and save phases
+3. Print a human-readable summary to the terminal
+4. Save detailed metrics to `benchmarks/baseline.json` for programmatic analysis
+
+Results include:
+- **Median, min, max** timings for robust comparison
+- **Phase breakdown** (time spent in each stage)
+- **Solver diagnostics** (iterations, steps, real-fluid success %, fallback usage)
+- **Aggregates** for trend detection and optimization validation
+
+See [benchmarks/README.md](benchmarks/README.md) for detailed interpretation and [docs/PERFORMANCE_BASELINE.md](docs/PERFORMANCE_BASELINE.md) for initial baseline results and hotspot analysis.
 
 ## Project Structure
 
@@ -100,6 +138,7 @@ Compare results across multiple runs. Create parameter sweeps, sensitivity matri
 ### Current (✅)
 
 - Steady-state fluid network simulation
+- Transient simulation for fixed-topology systems (single-CV and supported multi-CV benchmarks)
 - P&ID editor (basic node/component creation and editing)
 - Project file format (YAML)
 - Run caching and time-series storage
@@ -107,6 +146,7 @@ Compare results across multiple runs. Create parameter sweeps, sensitivity matri
 - GUI with System workspace
 - RefProp-compatible fluid properties
 - Component models: orifice, pipe, pump, turbine, valve
+- Timed valve schedules remain explicitly unsupported (validation rejects them)
 
 ### Planned
 

@@ -320,6 +320,18 @@ fn validate_component(
                 });
             }
         }
+        ComponentKind::LineVolume {
+            volume_m3,
+            cd,
+            area_m2,
+        } => {
+            validate_positive_finite("volume_m3", *volume_m3, &component.name)?;
+            // cd and area are optional (for lossless case)
+            if *cd > 0.0 {
+                validate_positive_finite("cd", *cd, &component.name)?;
+                validate_positive_finite("area_m2", *area_m2, &component.name)?;
+            }
+        }
     }
 
     Ok(())

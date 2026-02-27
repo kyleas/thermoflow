@@ -3770,6 +3770,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tf-bench"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tf-app",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "tf-cli"
 version = "0.1.0"
 dependencies = [

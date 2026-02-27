@@ -7,7 +7,7 @@ use tf_results::{
     EdgeValueSnapshot, GlobalValueSnapshot, NodeValueSnapshot, RunManifest, RunStore,
     RunType as ResultsRunType, TimeseriesRecord,
 };
-use tf_solver::{SolveProgressEvent, SteadyProblem};
+use tf_solver::{InitializationStrategy, SolveProgressEvent, SteadyProblem};
 
 use crate::error::AppResult;
 use crate::progress::{RunProgressEvent, RunStage, SteadyProgress, TransientProgress};
@@ -26,6 +26,7 @@ pub enum RunMode {
 pub struct RunOptions {
     pub use_cache: bool,
     pub solver_version: String,
+    pub initialization_strategy: Option<InitializationStrategy>,
 }
 
 impl Default for RunOptions {
@@ -33,6 +34,7 @@ impl Default for RunOptions {
         Self {
             use_cache: true,
             solver_version: "0.1.0".to_string(),
+            initialization_strategy: None,
         }
     }
 }
@@ -57,6 +59,10 @@ pub struct RunTimingSummary {
     pub transient_steps: usize,
     pub transient_cutback_retries: usize,
     pub transient_fallback_uses: usize,
+    pub transient_real_fluid_attempts: usize,
+    pub transient_real_fluid_successes: usize,
+    pub transient_surrogate_populations: usize,
+    pub initialization_strategy: Option<String>,
     pub steady_iterations: usize,
     pub steady_residual_norm: f64,
 }
@@ -70,11 +76,13 @@ pub struct RunResponse {
     pub timing: RunTimingSummary,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_progress(
     progress_cb: &mut Option<&mut dyn FnMut(RunProgressEvent)>,
     mode: RunMode,
     stage: RunStage,
     started: Instant,
+    initialization_strategy: Option<String>,
     message: Option<String>,
     steady: Option<SteadyProgress>,
     transient: Option<TransientProgress>,
@@ -84,6 +92,7 @@ fn emit_progress(
             mode,
             stage,
             elapsed_wall_s: started.elapsed().as_secs_f64(),
+            initialization_strategy,
             message,
             steady,
             transient,
@@ -109,6 +118,7 @@ pub fn ensure_run_with_progress(
         request.mode.clone(),
         RunStage::LoadingProject,
         started,
+        None,
         Some("Loading project".to_string()),
         None,
         None,
@@ -123,6 +133,7 @@ pub fn ensure_run_with_progress(
         request.mode.clone(),
         RunStage::CheckingCache,
         started,
+        None,
         Some("Checking run cache".to_string()),
         None,
         None,
@@ -154,6 +165,7 @@ pub fn ensure_run_with_progress(
             request.mode.clone(),
             RunStage::LoadingCachedResult,
             started,
+            None,
             Some("Loading cached run".to_string()),
             None,
             None,
@@ -169,6 +181,7 @@ pub fn ensure_run_with_progress(
             request.mode.clone(),
             RunStage::Completed,
             started,
+            None,
             Some("Loaded cached run".to_string()),
             None,
             None,
@@ -183,6 +196,16 @@ pub fn ensure_run_with_progress(
     }
 
     // Execute run
+    let mut timing = RunTimingSummary::default();
+
+    // Determine initialization strategy
+    let strategy = determine_initialization_strategy(
+        &request.mode,
+        system,
+        request.options.initialization_strategy,
+    );
+    timing.initialization_strategy = Some(strategy.as_str().to_string());
+
     let manifest = execute_run(
         system,
         request.system_id,
@@ -193,6 +216,7 @@ pub fn ensure_run_with_progress(
         &mut progress_cb,
         started,
         &mut timing,
+        strategy,
     )?;
 
     timing.total_time_s = started.elapsed().as_secs_f64();
@@ -202,6 +226,7 @@ pub fn ensure_run_with_progress(
         request.mode.clone(),
         RunStage::Completed,
         started,
+        timing.initialization_strategy.clone(),
         Some("Run completed".to_string()),
         None,
         None,
@@ -213,6 +238,52 @@ pub fn ensure_run_with_progress(
         loaded_from_cache: false,
         timing,
     })
+}
+
+/// Determine appropriate initialization strategy based on run context.
+///
+/// Priority:
+/// 1. User-specified strategy (if provided)
+/// 2. Auto-select based on run mode and system complexity:
+///    - Steady: Strict (simple, well-conditioned)
+///    - Transient with single CV: Strict
+///    - Transient with multiple CVs or LineVolumes: Relaxed (robust startup)
+fn determine_initialization_strategy(
+    mode: &RunMode,
+    system: &SystemDef,
+    user_strategy: Option<InitializationStrategy>,
+) -> InitializationStrategy {
+    use tf_project::schema::{ComponentKind, NodeKind};
+
+    // User-specified strategy takes precedence
+    if let Some(strategy) = user_strategy {
+        return strategy;
+    }
+
+    // Auto-select based on run mode and system complexity
+    match mode {
+        RunMode::Steady => InitializationStrategy::Strict,
+        RunMode::Transient { .. } => {
+            // Count control volumes and LineVolumes
+            let cv_count = system
+                .nodes
+                .iter()
+                .filter(|n| matches!(n.kind, NodeKind::ControlVolume { .. }))
+                .count();
+            let lv_count = system
+                .components
+                .iter()
+                .filter(|c| matches!(c.kind, ComponentKind::LineVolume { .. }))
+                .count();
+
+            // Use Relaxed for multi-CV or storage-rich transients
+            if cv_count > 1 || lv_count > 0 {
+                InitializationStrategy::Relaxed
+            } else {
+                InitializationStrategy::Strict
+            }
+        }
+    }
 }
 
 /// Execute a run (steady or transient).
@@ -227,6 +298,7 @@ fn execute_run(
     progress_cb: &mut Option<&mut dyn FnMut(RunProgressEvent)>,
     started: Instant,
     timing: &mut RunTimingSummary,
+    strategy: InitializationStrategy,
 ) -> AppResult<RunManifest> {
     match mode {
         RunMode::Steady => execute_steady(
@@ -238,6 +310,7 @@ fn execute_run(
             progress_cb,
             started,
             timing,
+            strategy,
         ),
         RunMode::Transient { dt_s, t_end_s } => execute_transient(
             system,
@@ -250,6 +323,7 @@ fn execute_run(
             progress_cb,
             started,
             timing,
+            strategy,
         ),
     }
 }
@@ -265,12 +339,14 @@ fn execute_steady(
     progress_cb: &mut Option<&mut dyn FnMut(RunProgressEvent)>,
     started: Instant,
     timing: &mut RunTimingSummary,
+    strategy: InitializationStrategy,
 ) -> AppResult<RunManifest> {
     emit_progress(
         progress_cb,
         RunMode::Steady,
         RunStage::CompilingRuntime,
         started,
+        timing.initialization_strategy.clone(),
         Some("Compiling runtime".to_string()),
         None,
         None,
@@ -293,6 +369,7 @@ fn execute_steady(
         RunMode::Steady,
         RunStage::BuildingSteadyProblem,
         started,
+        timing.initialization_strategy.clone(),
         Some("Building steady problem".to_string()),
         None,
         None,
@@ -333,6 +410,7 @@ fn execute_steady(
         RunMode::Steady,
         RunStage::SolvingSteady,
         started,
+        timing.initialization_strategy.clone(),
         Some("Solving steady system".to_string()),
         None,
         None,
@@ -341,76 +419,82 @@ fn execute_steady(
     // Solve
     let solve_started = Instant::now();
     let solution =
-        tf_solver::solve_with_progress(&mut problem, None, None, &mut |event| match event {
-            SolveProgressEvent::OuterIterationStarted {
-                outer_iteration,
-                max_outer_iterations,
-            } => emit_progress(
-                progress_cb,
-                RunMode::Steady,
-                RunStage::SolvingSteady,
-                started,
-                Some(format!(
-                    "Steady solve outer iteration {}/{}",
-                    outer_iteration, max_outer_iterations
-                )),
-                Some(SteadyProgress {
-                    outer_iteration: Some(outer_iteration),
-                    max_outer_iterations: Some(max_outer_iterations),
-                    ..Default::default()
-                }),
-                None,
-            ),
-            SolveProgressEvent::NewtonIteration {
-                outer_iteration,
-                iteration,
-                residual_norm,
-            } => emit_progress(
-                progress_cb,
-                RunMode::Steady,
-                RunStage::SolvingSteady,
-                started,
-                Some("Steady Newton iteration".to_string()),
-                Some(SteadyProgress {
-                    outer_iteration: Some(outer_iteration),
-                    iteration: Some(iteration),
-                    residual_norm: Some(residual_norm),
-                    ..Default::default()
-                }),
-                None,
-            ),
-            SolveProgressEvent::OuterIterationCompleted {
-                outer_iteration,
-                residual_norm,
-            } => emit_progress(
-                progress_cb,
-                RunMode::Steady,
-                RunStage::SolvingSteady,
-                started,
-                Some(format!("Outer iteration {} completed", outer_iteration)),
-                Some(SteadyProgress {
-                    outer_iteration: Some(outer_iteration),
-                    residual_norm: Some(residual_norm),
-                    ..Default::default()
-                }),
-                None,
-            ),
-            SolveProgressEvent::Converged {
-                total_iterations,
-                residual_norm,
-            } => emit_progress(
-                progress_cb,
-                RunMode::Steady,
-                RunStage::SolvingSteady,
-                started,
-                Some("Steady solve converged".to_string()),
-                Some(SteadyProgress {
-                    iteration: Some(total_iterations),
-                    residual_norm: Some(residual_norm),
-                    ..Default::default()
-                }),
-                None,
-            ),
+        tf_solver::solve_with_strategy_and_progress(&mut problem, strategy, None, &mut |event| {
+            match event {
+                SolveProgressEvent::OuterIterationStarted {
+                    outer_iteration,
+                    max_outer_iterations,
+                } => emit_progress(
+                    progress_cb,
+                    RunMode::Steady,
+                    RunStage::SolvingSteady,
+                    started,
+                    Some(strategy.as_str().to_string()),
+                    Some(format!(
+                        "Steady solve outer iteration {}/{}",
+                        outer_iteration, max_outer_iterations
+                    )),
+                    Some(SteadyProgress {
+                        outer_iteration: Some(outer_iteration),
+                        max_outer_iterations: Some(max_outer_iterations),
+                        ..Default::default()
+                    }),
+                    None,
+                ),
+                SolveProgressEvent::NewtonIteration {
+                    outer_iteration,
+                    iteration,
+                    residual_norm,
+                } => emit_progress(
+                    progress_cb,
+                    RunMode::Steady,
+                    RunStage::SolvingSteady,
+                    started,
+                    Some(strategy.as_str().to_string()),
+                    Some("Steady Newton iteration".to_string()),
+                    Some(SteadyProgress {
+                        outer_iteration: Some(outer_iteration),
+                        iteration: Some(iteration),
+                        residual_norm: Some(residual_norm),
+                        ..Default::default()
+                    }),
+                    None,
+                ),
+                SolveProgressEvent::OuterIterationCompleted {
+                    outer_iteration,
+                    residual_norm,
+                } => emit_progress(
+                    progress_cb,
+                    RunMode::Steady,
+                    RunStage::SolvingSteady,
+                    started,
+                    Some(strategy.as_str().to_string()),
+                    Some(format!("Outer iteration {} completed", outer_iteration)),
+                    Some(SteadyProgress {
+                        outer_iteration: Some(outer_iteration),
+                        residual_norm: Some(residual_norm),
+                        ..Default::default()
+                    }),
+                    None,
+                ),
+                SolveProgressEvent::Converged {
+                    total_iterations,
+                    residual_norm,
+                } => emit_progress(
+                    progress_cb,
+                    RunMode::Steady,
+                    RunStage::SolvingSteady,
+                    started,
+                    Some(strategy.as_str().to_string()),
+                    Some("Steady solve converged".to_string()),
+                    Some(SteadyProgress {
+                        iteration: Some(total_iterations),
+                        residual_norm: Some(residual_norm),
+                        ..Default::default()
+                    }),
+                    None,
+                ),
+            }
         })?;
     timing.solve_time_s = solve_started.elapsed().as_secs_f64();
     timing.steady_iterations = solution.iterations;
@@ -433,6 +517,7 @@ fn execute_steady(
         RunMode::Steady,
         RunStage::SavingResults,
         started,
+        timing.initialization_strategy.clone(),
         Some("Saving run output".to_string()),
         None,
         None,
@@ -459,6 +544,7 @@ fn execute_transient(
     progress_cb: &mut Option<&mut dyn FnMut(RunProgressEvent)>,
     started: Instant,
     timing: &mut RunTimingSummary,
+    strategy: InitializationStrategy,
 ) -> AppResult<RunManifest> {
     use crate::transient_compile::TransientNetworkModel;
     use tf_sim::{run_sim_with_progress, SimOptions};
@@ -468,6 +554,7 @@ fn execute_transient(
         RunMode::Transient { dt_s, t_end_s },
         RunStage::CompilingRuntime,
         started,
+        timing.initialization_strategy.clone(),
         Some("Compiling runtime".to_string()),
         None,
         None,
@@ -478,14 +565,17 @@ fn execute_transient(
     let runtime = runtime_compile::compile_system(system)?;
     timing.compile_time_s = compile_started.elapsed().as_secs_f64();
 
-    // Create transient model
-    let mut model = TransientNetworkModel::new(system, &runtime)?;
+    // Create transient model (strategy used internally for solver config)
+    let build_started = Instant::now();
+    let mut model = TransientNetworkModel::new(system, &runtime, strategy)?;
+    timing.build_time_s = build_started.elapsed().as_secs_f64();
 
     emit_progress(
         progress_cb,
         RunMode::Transient { dt_s, t_end_s },
         RunStage::RunningTransient,
         started,
+        timing.initialization_strategy.clone(),
         Some("Running transient simulation".to_string()),
         None,
         Some(TransientProgress {
@@ -521,6 +611,7 @@ fn execute_transient(
                 RunMode::Transient { dt_s, t_end_s },
                 RunStage::RunningTransient,
                 started,
+                Some(strategy.as_str().to_string()),
                 Some(format!(
                     "Step {} | t={:.4}/{:.4} s | retries={} ",
                     p.step, p.sim_time, p.t_end, p.cutback_retries
@@ -540,9 +631,12 @@ fn execute_transient(
     timing.solve_time_s = solve_started.elapsed().as_secs_f64();
     timing.transient_steps = sim_record.steps;
     timing.transient_cutback_retries = sim_record.cutback_retries;
+    timing.transient_real_fluid_attempts = model.real_fluid_attempts();
+    timing.transient_real_fluid_successes = model.real_fluid_successes();
+    timing.transient_surrogate_populations = model.surrogate_populations();
 
     // Convert simulation records to timeseries records for storage
-    let mut timeseries_records = Vec::new();
+    let mut timeseries_records = Vec::with_capacity(sim_record.t.len());
     for (time, state) in sim_record.t.iter().zip(sim_record.x.iter()) {
         let ts_record = model.build_timeseries_record(*time, state)?;
         timeseries_records.push(ts_record);
@@ -570,6 +664,7 @@ fn execute_transient(
         RunMode::Transient { dt_s, t_end_s },
         RunStage::SavingResults,
         started,
+        timing.initialization_strategy.clone(),
         Some("Saving run output".to_string()),
         None,
         Some(TransientProgress {
@@ -595,7 +690,7 @@ fn solution_to_timeseries(
     solution: &tf_solver::SteadySolution,
     runtime: &SystemRuntime,
 ) -> TimeseriesRecord {
-    let mut node_values = Vec::new();
+    let mut node_values = Vec::with_capacity(runtime.node_id_map.len());
     for (node_id_str, &node_idx) in &runtime.node_id_map {
         if let Some(&p_val) = solution.pressures.get(node_idx.index() as usize) {
             let h_val = solution
@@ -614,9 +709,11 @@ fn solution_to_timeseries(
         }
     }
 
-    let mut edge_values = Vec::new();
+    let mass_flow_by_comp: std::collections::HashMap<_, _> =
+        solution.mass_flows.iter().copied().collect();
+    let mut edge_values = Vec::with_capacity(runtime.comp_id_map.len());
     for (comp_id_str, &comp_idx) in &runtime.comp_id_map {
-        if let Some((_, mdot)) = solution.mass_flows.iter().find(|(id, _)| *id == comp_idx) {
+        if let Some(mdot) = mass_flow_by_comp.get(&comp_idx) {
             edge_values.push(EdgeValueSnapshot {
                 component_id: comp_id_str.clone(),
                 mdot_kg_s: Some(*mdot),

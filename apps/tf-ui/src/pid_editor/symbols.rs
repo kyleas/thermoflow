@@ -87,5 +87,10 @@ pub fn draw_component_symbol(
                 Stroke::new(2.0, color),
             );
         }
+        ComponentKind::LineVolume { .. } => {
+            // Draw a rectangle to represent volume
+            let rect = egui::Rect::from_center_size(center, Vec2::new(20.0, 12.0));
+            painter.rect_stroke(rect, 0.0, Stroke::new(2.0, color));
+        }
     }
 }

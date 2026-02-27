@@ -173,6 +173,7 @@ fn cmd_run_steady(project_path: &Path, system_id: &str, use_cache: bool) -> AppR
         options: RunOptions {
             use_cache,
             solver_version: "0.1.0".to_string(),
+            initialization_strategy: None,
         },
     };
 
@@ -190,7 +191,7 @@ fn cmd_run_steady(project_path: &Path, system_id: &str, use_cache: bool) -> AppR
             }
         }),
     )?;
-    println!();
+    clear_progress_line();
 
     if response.loaded_from_cache {
         println!("✓ Loaded from cache: {}", response.run_id);
@@ -230,6 +231,7 @@ fn cmd_run_transient(
         options: RunOptions {
             use_cache,
             solver_version: "0.1.0".to_string(),
+            initialization_strategy: None,
         },
     };
 
@@ -254,7 +256,7 @@ fn cmd_run_transient(
             }
         }),
     )?;
-    println!();
+    clear_progress_line();
 
     if response.loaded_from_cache {
         println!("✓ Loaded from cache: {}", response.run_id);
@@ -274,6 +276,11 @@ fn cmd_run_transient(
     Ok(())
 }
 
+fn clear_progress_line() {
+    print!("\r{}\r", " ".repeat(180));
+    let _ = io::stdout().flush();
+}
+
 fn render_cli_progress(event: &RunProgressEvent) {
     match event.stage {
         RunStage::RunningTransient => {
@@ -286,9 +293,10 @@ fn render_cli_progress(event: &RunProgressEvent) {
                     "-".repeat(width.saturating_sub(filled))
                 );
                 print!(
-                    "\r[{}] {:>6.2}%  t={:.3}/{:.3}s  step={}  cutbacks={}  elapsed={:.1}s",
+                    "\r[{}] {:>6.2}%  phase={}  t={:.3}/{:.3}s  step={}  cutbacks={}  elapsed={:.1}s",
                     bar,
                     t.fraction_complete * 100.0,
+                    event.stage.label(),
                     t.sim_time_s,
                     t.t_end_s,
                     t.step,
@@ -302,9 +310,14 @@ fn render_cli_progress(event: &RunProgressEvent) {
             let spinner = ['|', '/', '-', '\\'];
             let spin_idx = ((event.elapsed_wall_s * 10.0) as usize) % spinner.len();
             let mut line = format!(
-                "\r{} {:?}  elapsed={:.2}s",
-                spinner[spin_idx], event.stage, event.elapsed_wall_s
+                "\r{} {}  elapsed={:.2}s",
+                spinner[spin_idx],
+                event.stage.label(),
+                event.elapsed_wall_s
             );
+            if let Some(strategy) = &event.initialization_strategy {
+                line.push_str(&format!("  init={}", strategy));
+            }
             if let Some(s) = &event.steady {
                 if let Some(iter) = s.iteration {
                     line.push_str(&format!("  iter={}", iter));
@@ -323,13 +336,26 @@ fn render_cli_progress(event: &RunProgressEvent) {
 }
 
 fn print_timing_summary(mode: &RunMode, timing: &tf_app::RunTimingSummary) {
-    println!("\nTiming summary:");
-    println!("  Compile: {:.3}s", timing.compile_time_s);
-    if timing.build_time_s > 0.0 {
-        println!("  Build:   {:.3}s", timing.build_time_s);
+    if let Some(strategy_name) = &timing.initialization_strategy {
+        println!("\nInitialization: {}", strategy_name);
     }
-    println!("  Solve:   {:.3}s", timing.solve_time_s);
-    println!("  Save:    {:.3}s", timing.save_time_s);
+
+    let total = timing.total_time_s.max(1.0e-12);
+    let compile_pct = 100.0 * timing.compile_time_s / total;
+    let build_pct = 100.0 * timing.build_time_s / total;
+    let solve_pct = 100.0 * timing.solve_time_s / total;
+    let save_pct = 100.0 * timing.save_time_s / total;
+
+    println!("\nTiming summary:");
+    println!(
+        "  Compile: {:.3}s ({:.1}%)",
+        timing.compile_time_s, compile_pct
+    );
+    if timing.build_time_s > 0.0 {
+        println!("  Build:   {:.3}s ({:.1}%)", timing.build_time_s, build_pct);
+    }
+    println!("  Solve:   {:.3}s ({:.1}%)", timing.solve_time_s, solve_pct);
+    println!("  Save:    {:.3}s ({:.1}%)", timing.save_time_s, save_pct);
     if timing.load_cache_time_s > 0.0 {
         println!("  Cache load: {:.3}s", timing.load_cache_time_s);
     }
@@ -346,6 +372,20 @@ fn print_timing_summary(mode: &RunMode, timing: &tf_app::RunTimingSummary) {
             println!("  Transient steps: {}", timing.transient_steps);
             println!("  Cutback retries: {}", timing.transient_cutback_retries);
             println!("  Fallback uses:   {}", timing.transient_fallback_uses);
+            if timing.transient_real_fluid_attempts > 0 {
+                let success_pct = 100.0 * (timing.transient_real_fluid_successes as f64)
+                    / (timing.transient_real_fluid_attempts as f64);
+                println!(
+                    "  Real-fluid:      {}/{} ({:.1}%)",
+                    timing.transient_real_fluid_successes,
+                    timing.transient_real_fluid_attempts,
+                    success_pct
+                );
+            }
+            println!(
+                "  Surrogate updates: {}",
+                timing.transient_surrogate_populations
+            );
         }
     }
 }
