@@ -61,6 +61,12 @@ pub struct RunMetrics {
     pub solve_linearch_iter_count: Option<usize>,
     pub rhs_calls: Option<usize>,
     pub rhs_snapshot_time_s: Option<f64>,
+    pub rhs_plan_check_time_s: Option<f64>,
+    pub rhs_component_rebuild_time_s: Option<f64>,
+    pub rhs_snapshot_structure_setup_time_s: Option<f64>,
+    pub rhs_boundary_hydration_time_s: Option<f64>,
+    pub rhs_direct_solve_setup_time_s: Option<f64>,
+    pub rhs_result_unpack_time_s: Option<f64>,
     pub rhs_state_reconstruct_time_s: Option<f64>,
     pub rhs_buffer_init_time_s: Option<f64>,
     pub rhs_flow_routing_time_s: Option<f64>,
@@ -69,6 +75,12 @@ pub struct RunMetrics {
     pub rhs_assembly_time_s: Option<f64>,
     pub rhs_surrogate_time_s: Option<f64>,
     pub rk4_bookkeeping_time_s: Option<f64>,
+    pub execution_plan_checks: Option<usize>,
+    pub execution_plan_unchanged: Option<usize>,
+    pub component_rebuilds: Option<usize>,
+    pub component_reuses: Option<usize>,
+    pub snapshot_setup_rebuilds: Option<usize>,
+    pub snapshot_setup_reuses: Option<usize>,
     pub loaded_from_cache: bool,
     pub initialization_strategy: Option<String>,
     pub steady_iterations: Option<usize>,
@@ -98,6 +110,12 @@ pub struct AggregateMetrics {
     pub solve_thermo_time_median_s: Option<f64>,
     pub rhs_calls_median: Option<usize>,
     pub rhs_snapshot_time_median_s: Option<f64>,
+    pub rhs_plan_check_time_median_s: Option<f64>,
+    pub rhs_component_rebuild_time_median_s: Option<f64>,
+    pub rhs_snapshot_structure_setup_time_median_s: Option<f64>,
+    pub rhs_boundary_hydration_time_median_s: Option<f64>,
+    pub rhs_direct_solve_setup_time_median_s: Option<f64>,
+    pub rhs_result_unpack_time_median_s: Option<f64>,
     pub rhs_state_reconstruct_time_median_s: Option<f64>,
     pub rhs_buffer_init_time_median_s: Option<f64>,
     pub rhs_flow_routing_time_median_s: Option<f64>,
@@ -106,6 +124,12 @@ pub struct AggregateMetrics {
     pub rhs_assembly_time_median_s: Option<f64>,
     pub rhs_surrogate_time_median_s: Option<f64>,
     pub rk4_bookkeeping_time_median_s: Option<f64>,
+    pub execution_plan_checks_median: Option<usize>,
+    pub execution_plan_unchanged_median: Option<usize>,
+    pub component_rebuilds_median: Option<usize>,
+    pub component_reuses_median: Option<usize>,
+    pub snapshot_setup_rebuilds_median: Option<usize>,
+    pub snapshot_setup_reuses_median: Option<usize>,
     pub steady_iterations_median: Option<usize>,
     pub transient_steps_median: Option<usize>,
     pub transient_cutback_retries_total: usize,
@@ -179,6 +203,18 @@ pub fn run_scenario(
             rhs_calls: (timing.rhs_calls > 0).then_some(timing.rhs_calls),
             rhs_snapshot_time_s: (timing.rhs_snapshot_time_s > 0.0)
                 .then_some(timing.rhs_snapshot_time_s),
+            rhs_plan_check_time_s: (timing.rhs_plan_check_time_s > 0.0)
+                .then_some(timing.rhs_plan_check_time_s),
+            rhs_component_rebuild_time_s: (timing.rhs_component_rebuild_time_s > 0.0)
+                .then_some(timing.rhs_component_rebuild_time_s),
+            rhs_snapshot_structure_setup_time_s: (timing.rhs_snapshot_structure_setup_time_s > 0.0)
+                .then_some(timing.rhs_snapshot_structure_setup_time_s),
+            rhs_boundary_hydration_time_s: (timing.rhs_boundary_hydration_time_s > 0.0)
+                .then_some(timing.rhs_boundary_hydration_time_s),
+            rhs_direct_solve_setup_time_s: (timing.rhs_direct_solve_setup_time_s > 0.0)
+                .then_some(timing.rhs_direct_solve_setup_time_s),
+            rhs_result_unpack_time_s: (timing.rhs_result_unpack_time_s > 0.0)
+                .then_some(timing.rhs_result_unpack_time_s),
             rhs_state_reconstruct_time_s: (timing.rhs_state_reconstruct_time_s > 0.0)
                 .then_some(timing.rhs_state_reconstruct_time_s),
             rhs_buffer_init_time_s: (timing.rhs_buffer_init_time_s > 0.0)
@@ -195,6 +231,17 @@ pub fn run_scenario(
                 .then_some(timing.rhs_surrogate_time_s),
             rk4_bookkeeping_time_s: (timing.rk4_bookkeeping_time_s > 0.0)
                 .then_some(timing.rk4_bookkeeping_time_s),
+            execution_plan_checks: (timing.execution_plan_checks > 0)
+                .then_some(timing.execution_plan_checks),
+            execution_plan_unchanged: (timing.execution_plan_unchanged > 0)
+                .then_some(timing.execution_plan_unchanged),
+            component_rebuilds: (timing.component_rebuilds > 0)
+                .then_some(timing.component_rebuilds),
+            component_reuses: (timing.component_reuses > 0).then_some(timing.component_reuses),
+            snapshot_setup_rebuilds: (timing.snapshot_setup_rebuilds > 0)
+                .then_some(timing.snapshot_setup_rebuilds),
+            snapshot_setup_reuses: (timing.snapshot_setup_reuses > 0)
+                .then_some(timing.snapshot_setup_reuses),
             loaded_from_cache: response.loaded_from_cache,
             initialization_strategy: timing.initialization_strategy.clone(),
             steady_iterations: (timing.steady_iterations > 0).then_some(timing.steady_iterations),
@@ -241,6 +288,12 @@ fn compute_aggregates(runs: &[RunMetrics], _scenario: &BenchmarkScenario) -> Agg
             solve_thermo_time_median_s: None,
             rhs_calls_median: None,
             rhs_snapshot_time_median_s: None,
+            rhs_plan_check_time_median_s: None,
+            rhs_component_rebuild_time_median_s: None,
+            rhs_snapshot_structure_setup_time_median_s: None,
+            rhs_boundary_hydration_time_median_s: None,
+            rhs_direct_solve_setup_time_median_s: None,
+            rhs_result_unpack_time_median_s: None,
             rhs_state_reconstruct_time_median_s: None,
             rhs_buffer_init_time_median_s: None,
             rhs_flow_routing_time_median_s: None,
@@ -249,6 +302,12 @@ fn compute_aggregates(runs: &[RunMetrics], _scenario: &BenchmarkScenario) -> Agg
             rhs_assembly_time_median_s: None,
             rhs_surrogate_time_median_s: None,
             rk4_bookkeeping_time_median_s: None,
+            execution_plan_checks_median: None,
+            execution_plan_unchanged_median: None,
+            component_rebuilds_median: None,
+            component_reuses_median: None,
+            snapshot_setup_rebuilds_median: None,
+            snapshot_setup_reuses_median: None,
             steady_iterations_median: None,
             transient_steps_median: None,
             transient_cutback_retries_total: 0,
@@ -310,6 +369,64 @@ fn compute_aggregates(runs: &[RunMetrics], _scenario: &BenchmarkScenario) -> Agg
     rhs_snapshot_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let rhs_snapshot_time_median = rhs_snapshot_times
         .get(rhs_snapshot_times.len() / 2)
+        .copied();
+
+    let mut rhs_plan_check_times: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.rhs_plan_check_time_s)
+        .collect();
+    rhs_plan_check_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rhs_plan_check_time_median = rhs_plan_check_times
+        .get(rhs_plan_check_times.len() / 2)
+        .copied();
+
+    let mut rhs_component_rebuild_times: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.rhs_component_rebuild_time_s)
+        .collect();
+    rhs_component_rebuild_times
+        .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rhs_component_rebuild_time_median = rhs_component_rebuild_times
+        .get(rhs_component_rebuild_times.len() / 2)
+        .copied();
+
+    let mut rhs_snapshot_structure_setup_times: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.rhs_snapshot_structure_setup_time_s)
+        .collect();
+    rhs_snapshot_structure_setup_times
+        .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rhs_snapshot_structure_setup_time_median = rhs_snapshot_structure_setup_times
+        .get(rhs_snapshot_structure_setup_times.len() / 2)
+        .copied();
+
+    let mut rhs_boundary_hydration_times: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.rhs_boundary_hydration_time_s)
+        .collect();
+    rhs_boundary_hydration_times
+        .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rhs_boundary_hydration_time_median = rhs_boundary_hydration_times
+        .get(rhs_boundary_hydration_times.len() / 2)
+        .copied();
+
+    let mut rhs_direct_solve_setup_times: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.rhs_direct_solve_setup_time_s)
+        .collect();
+    rhs_direct_solve_setup_times
+        .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rhs_direct_solve_setup_time_median = rhs_direct_solve_setup_times
+        .get(rhs_direct_solve_setup_times.len() / 2)
+        .copied();
+
+    let mut rhs_result_unpack_times: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.rhs_result_unpack_time_s)
+        .collect();
+    rhs_result_unpack_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rhs_result_unpack_time_median = rhs_result_unpack_times
+        .get(rhs_result_unpack_times.len() / 2)
         .copied();
 
     let mut rhs_state_reconstruct_times: Vec<_> = runs
@@ -381,6 +498,52 @@ fn compute_aggregates(runs: &[RunMetrics], _scenario: &BenchmarkScenario) -> Agg
         .get(rk4_bookkeeping_times.len() / 2)
         .copied();
 
+    let mut execution_plan_checks: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.execution_plan_checks)
+        .collect();
+    execution_plan_checks.sort_unstable();
+    let execution_plan_checks_median = execution_plan_checks
+        .get(execution_plan_checks.len() / 2)
+        .copied();
+
+    let mut execution_plan_unchanged: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.execution_plan_unchanged)
+        .collect();
+    execution_plan_unchanged.sort_unstable();
+    let execution_plan_unchanged_median = execution_plan_unchanged
+        .get(execution_plan_unchanged.len() / 2)
+        .copied();
+
+    let mut component_rebuilds: Vec<_> = runs.iter().filter_map(|r| r.component_rebuilds).collect();
+    component_rebuilds.sort_unstable();
+    let component_rebuilds_median = component_rebuilds
+        .get(component_rebuilds.len() / 2)
+        .copied();
+
+    let mut component_reuses: Vec<_> = runs.iter().filter_map(|r| r.component_reuses).collect();
+    component_reuses.sort_unstable();
+    let component_reuses_median = component_reuses.get(component_reuses.len() / 2).copied();
+
+    let mut snapshot_setup_rebuilds: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.snapshot_setup_rebuilds)
+        .collect();
+    snapshot_setup_rebuilds.sort_unstable();
+    let snapshot_setup_rebuilds_median = snapshot_setup_rebuilds
+        .get(snapshot_setup_rebuilds.len() / 2)
+        .copied();
+
+    let mut snapshot_setup_reuses: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.snapshot_setup_reuses)
+        .collect();
+    snapshot_setup_reuses.sort_unstable();
+    let snapshot_setup_reuses_median = snapshot_setup_reuses
+        .get(snapshot_setup_reuses.len() / 2)
+        .copied();
+
     let mut steady_iters: Vec<_> = runs.iter().filter_map(|r| r.steady_iterations).collect();
     steady_iters.sort_unstable();
 
@@ -425,6 +588,12 @@ fn compute_aggregates(runs: &[RunMetrics], _scenario: &BenchmarkScenario) -> Agg
         solve_thermo_time_median_s: solve_thermo_time_median,
         rhs_calls_median,
         rhs_snapshot_time_median_s: rhs_snapshot_time_median,
+        rhs_plan_check_time_median_s: rhs_plan_check_time_median,
+        rhs_component_rebuild_time_median_s: rhs_component_rebuild_time_median,
+        rhs_snapshot_structure_setup_time_median_s: rhs_snapshot_structure_setup_time_median,
+        rhs_boundary_hydration_time_median_s: rhs_boundary_hydration_time_median,
+        rhs_direct_solve_setup_time_median_s: rhs_direct_solve_setup_time_median,
+        rhs_result_unpack_time_median_s: rhs_result_unpack_time_median,
         rhs_state_reconstruct_time_median_s: rhs_state_reconstruct_time_median,
         rhs_buffer_init_time_median_s: rhs_buffer_init_time_median,
         rhs_flow_routing_time_median_s: rhs_flow_routing_time_median,
@@ -433,6 +602,12 @@ fn compute_aggregates(runs: &[RunMetrics], _scenario: &BenchmarkScenario) -> Agg
         rhs_assembly_time_median_s: rhs_assembly_time_median,
         rhs_surrogate_time_median_s: rhs_surrogate_time_median,
         rk4_bookkeeping_time_median_s: rk4_bookkeeping_time_median,
+        execution_plan_checks_median,
+        execution_plan_unchanged_median,
+        component_rebuilds_median,
+        component_reuses_median,
+        snapshot_setup_rebuilds_median,
+        snapshot_setup_reuses_median,
         steady_iterations_median: steady_iters.get(steady_iters.len() / 2).copied(),
         transient_steps_median: transient_steps.get(transient_steps.len() / 2).copied(),
         transient_cutback_retries_total: cutback_total,
@@ -534,6 +709,12 @@ impl Default for RunMetrics {
             solve_linearch_iter_count: None,
             rhs_calls: None,
             rhs_snapshot_time_s: None,
+            rhs_plan_check_time_s: None,
+            rhs_component_rebuild_time_s: None,
+            rhs_snapshot_structure_setup_time_s: None,
+            rhs_boundary_hydration_time_s: None,
+            rhs_direct_solve_setup_time_s: None,
+            rhs_result_unpack_time_s: None,
             rhs_state_reconstruct_time_s: None,
             rhs_buffer_init_time_s: None,
             rhs_flow_routing_time_s: None,
@@ -542,6 +723,12 @@ impl Default for RunMetrics {
             rhs_assembly_time_s: None,
             rhs_surrogate_time_s: None,
             rk4_bookkeeping_time_s: None,
+            execution_plan_checks: None,
+            execution_plan_unchanged: None,
+            component_rebuilds: None,
+            component_reuses: None,
+            snapshot_setup_rebuilds: None,
+            snapshot_setup_reuses: None,
             loaded_from_cache: false,
             initialization_strategy: None,
             steady_iterations: None,
@@ -621,6 +808,12 @@ mod tests {
             solve_linearch_iter_count: None,
             rhs_calls: None,
             rhs_snapshot_time_s: None,
+            rhs_plan_check_time_s: None,
+            rhs_component_rebuild_time_s: None,
+            rhs_snapshot_structure_setup_time_s: None,
+            rhs_boundary_hydration_time_s: None,
+            rhs_direct_solve_setup_time_s: None,
+            rhs_result_unpack_time_s: None,
             rhs_state_reconstruct_time_s: None,
             rhs_buffer_init_time_s: None,
             rhs_flow_routing_time_s: None,
@@ -629,6 +822,12 @@ mod tests {
             rhs_assembly_time_s: None,
             rhs_surrogate_time_s: None,
             rk4_bookkeeping_time_s: None,
+            execution_plan_checks: None,
+            execution_plan_unchanged: None,
+            component_rebuilds: None,
+            component_reuses: None,
+            snapshot_setup_rebuilds: None,
+            snapshot_setup_reuses: None,
             loaded_from_cache: false,
             initialization_strategy: Some("Strict".to_string()),
             steady_iterations: Some(5),

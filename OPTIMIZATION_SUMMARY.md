@@ -1,5 +1,82 @@
 # Performance Optimization Summary - Phase 1 (Feb 2026)
 
+## Phase 5: Snapshot/Build Decomposition + Targeted Direct-Setup Pass (Feb 2026)
+
+### Goal
+Precisely split remaining snapshot/build cost after Phase 4 and optimize the dominant measured sub-bucket.
+
+### Instrumentation Added
+
+Added fine-grained snapshot/build timing fields:
+
+- `rhs_plan_check_time_s`
+- `rhs_component_rebuild_time_s`
+- `rhs_snapshot_structure_setup_time_s`
+- `rhs_boundary_hydration_time_s`
+- `rhs_direct_solve_setup_time_s`
+- `rhs_result_unpack_time_s`
+
+Added rebuild/setup counters:
+
+- `execution_plan_checks`
+- `execution_plan_unchanged`
+- `component_rebuilds`
+- `component_reuses`
+- `snapshot_setup_rebuilds`
+- `snapshot_setup_reuses`
+
+All fields were wired through:
+
+- transient runtime accumulation (`tf-app`)
+- `RunTimingSummary` serialization path (`tf-app`)
+- benchmark run metrics + aggregate medians (`tf-bench`)
+
+### Dominant Sub-Bucket Identified
+
+The dominant remaining hotspot inside snapshot work is:
+
+- `rhs_direct_solve_setup_time_s` at roughly **75-83% of solve time** on supported transient scenarios.
+
+Component rebuild, boundary hydration, plan checks, and result unpack are all comparatively tiny.
+
+### Targeted Optimization Implemented
+
+Focused optimization on dominant setup path:
+
+- Throttled CV surrogate refresh on successful real-fluid boundary solves.
+- Surrogate refresh now occurs only when $(P,h)$ changes materially (>5%) from the last surrogate anchor.
+- This preserves fallback correctness while removing unnecessary setup work in stable stages.
+
+### Rebuild/Reuse Frequency (Median)
+
+Observed on supported transients:
+
+- `execution_plan_checks`: 44
+- `execution_plan_unchanged`: 43
+- `component_rebuilds`: 44
+- `component_reuses`: 0
+- `snapshot_setup_rebuilds`: 44
+- `snapshot_setup_reuses`: 0
+
+### Benchmark Comparison vs Post-Phase-4 Baseline
+
+| Scenario | Solve Before | Solve After | Delta |
+|----------|--------------|-------------|-------|
+| 03_transient | 4.363s | 4.006s | **+8.2%** |
+| 04_transient | 8.345s | 8.226s | **+1.4%** |
+| 05_transient | 8.414s | 10.064s | **-19.6%** |
+| 07_transient | 4.272s | 5.602s | **-31.1%** |
+| 08_transient | 8.654s | 10.217s | **-18.1%** |
+
+Net: instrumentation objective was achieved; optimization effect is mixed with regressions in this run set and requires follow-up.
+
+### Verification Status
+
+- `cargo fmt --all` ✅
+- `cargo test --workspace` ✅
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` ✅
+- Supported benchmark suite re-run ✅
+
 ## Objective
 Use the benchmark system to make measured, targeted performance improvements on supported workflows.
 

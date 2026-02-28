@@ -159,6 +159,12 @@ This section traces the actual code flow for each major workflow.
 - RHS profiling buckets (transient hot-path observability):
    - `rhs_calls`
    - `rhs_snapshot_time_s`
+   - `rhs_plan_check_time_s`
+   - `rhs_component_rebuild_time_s`
+   - `rhs_snapshot_structure_setup_time_s`
+   - `rhs_boundary_hydration_time_s`
+   - `rhs_direct_solve_setup_time_s`
+   - `rhs_result_unpack_time_s`
    - `rhs_state_reconstruct_time_s`
    - `rhs_buffer_init_time_s`
    - `rhs_flow_routing_time_s`
@@ -166,6 +172,10 @@ This section traces the actual code flow for each major workflow.
    - `rhs_lv_derivative_time_s`
    - `rhs_assembly_time_s`
    - `rhs_surrogate_time_s`
+ - Snapshot/build counters:
+   - `execution_plan_checks`, `execution_plan_unchanged`
+   - `component_rebuilds`, `component_reuses`
+   - `snapshot_setup_rebuilds`, `snapshot_setup_reuses`
 
 **Key sub-module**:
 - **Transient compile** (`transient_compile.rs`): Wraps steady solver in transient framework

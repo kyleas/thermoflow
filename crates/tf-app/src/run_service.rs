@@ -66,6 +66,12 @@ pub struct RunTimingSummary {
     pub solve_linearch_iter_count: usize,
     pub rhs_calls: usize,
     pub rhs_snapshot_time_s: f64,
+    pub rhs_plan_check_time_s: f64,
+    pub rhs_component_rebuild_time_s: f64,
+    pub rhs_snapshot_structure_setup_time_s: f64,
+    pub rhs_boundary_hydration_time_s: f64,
+    pub rhs_direct_solve_setup_time_s: f64,
+    pub rhs_result_unpack_time_s: f64,
     pub rhs_state_reconstruct_time_s: f64,
     pub rhs_buffer_init_time_s: f64,
     pub rhs_flow_routing_time_s: f64,
@@ -74,6 +80,12 @@ pub struct RunTimingSummary {
     pub rhs_assembly_time_s: f64,
     pub rhs_surrogate_time_s: f64,
     pub rk4_bookkeeping_time_s: f64,
+    pub execution_plan_checks: usize,
+    pub execution_plan_unchanged: usize,
+    pub component_rebuilds: usize,
+    pub component_reuses: usize,
+    pub snapshot_setup_rebuilds: usize,
+    pub snapshot_setup_reuses: usize,
     pub transient_steps: usize,
     pub transient_cutback_retries: usize,
     pub transient_fallback_uses: usize,
@@ -670,6 +682,12 @@ fn execute_transient(
     timing.solve_linearch_iter_count = model.solver_linearch_iter_count();
     timing.rhs_calls = model.rhs_calls();
     timing.rhs_snapshot_time_s = model.rhs_snapshot_time_s();
+    timing.rhs_plan_check_time_s = model.rhs_plan_check_time_s();
+    timing.rhs_component_rebuild_time_s = model.rhs_component_rebuild_time_s();
+    timing.rhs_snapshot_structure_setup_time_s = model.rhs_snapshot_structure_setup_time_s();
+    timing.rhs_boundary_hydration_time_s = model.rhs_boundary_hydration_time_s();
+    timing.rhs_direct_solve_setup_time_s = model.rhs_direct_solve_setup_time_s();
+    timing.rhs_result_unpack_time_s = model.rhs_result_unpack_time_s();
     timing.rhs_state_reconstruct_time_s = model.rhs_state_reconstruct_time_s();
     timing.rhs_buffer_init_time_s = model.rhs_buffer_init_time_s();
     timing.rhs_flow_routing_time_s = model.rhs_flow_routing_time_s();
@@ -677,6 +695,12 @@ fn execute_transient(
     timing.rhs_lv_derivative_time_s = model.rhs_lv_derivative_time_s();
     timing.rhs_assembly_time_s = model.rhs_assembly_time_s();
     timing.rhs_surrogate_time_s = model.rhs_surrogate_time_s();
+    timing.execution_plan_checks = model.execution_plan_checks();
+    timing.execution_plan_unchanged = model.execution_plan_unchanged();
+    timing.component_rebuilds = model.component_rebuilds();
+    timing.component_reuses = model.component_reuses();
+    timing.snapshot_setup_rebuilds = model.snapshot_setup_rebuilds();
+    timing.snapshot_setup_reuses = model.snapshot_setup_reuses();
     let rhs_accounted = timing.rhs_snapshot_time_s
         + timing.rhs_state_reconstruct_time_s
         + timing.rhs_buffer_init_time_s

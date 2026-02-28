@@ -89,6 +89,12 @@ struct RhsTimingBreakdown {
     rhs_calls: usize,
     rhs_snapshot_time_s: f64,
     rhs_component_build_time_s: f64,
+    rhs_plan_check_time_s: f64,
+    rhs_component_rebuild_time_s: f64,
+    rhs_snapshot_structure_setup_time_s: f64,
+    rhs_boundary_hydration_time_s: f64,
+    rhs_direct_solve_setup_time_s: f64,
+    rhs_result_unpack_time_s: f64,
     rhs_state_reconstruct_time_s: f64,
     rhs_buffer_init_time_s: f64,
     rhs_flow_routing_time_s: f64,
@@ -97,6 +103,12 @@ struct RhsTimingBreakdown {
     rhs_assembly_time_s: f64,
     rhs_surrogate_time_s: f64,
     rk4_bookkeeping_time_s: f64,
+    execution_plan_checks: usize,
+    execution_plan_unchanged: usize,
+    component_rebuilds: usize,
+    component_reuses: usize,
+    snapshot_setup_rebuilds: usize,
+    snapshot_setup_reuses: usize,
 }
 
 /// Pre-allocated reusable buffers for RHS computation.
@@ -208,7 +220,8 @@ pub struct TransientNetworkModel {
     flow_routes: HashMap<CompId, FlowRoute>,
     initial_state: TransientState,
     schedules: ScheduleData,
-    has_dynamic_schedules: bool,
+    has_dynamic_component_schedules: bool,
+    has_dynamic_boundary_schedules: bool,
     last_steady_solution: Option<SteadySolution>,
     last_cv_pressure: Vec<Option<Pressure>>,
     last_cv_enthalpy: Vec<Option<f64>>, // CoolProp-compatible h when fallback is active
@@ -225,6 +238,7 @@ pub struct TransientNetworkModel {
     // Thermodynamic fallback surrogates: one per control volume for robustness
     // Built from the last valid real-fluid state; used when CoolProp fails mid-solve
     cv_surrogate_models: Vec<Option<FrozenPropertySurrogate>>,
+    cv_surrogate_anchor: Vec<Option<(Pressure, f64)>>,
     #[allow(dead_code)]
     lv_surrogate_models: Vec<Option<FrozenPropertySurrogate>>, // Surrogates for LineVolumes
 
@@ -251,13 +265,14 @@ pub struct TransientNetworkModel {
 
     // Phase 4 optimization: Persistent execution plan, state cache, and scratch buffers
     execution_plan: Option<TransientExecutionPlan>,
+    reusable_components: HashMap<CompId, Box<dyn TwoPortComponent>>,
+    static_boundaries: Option<HashMap<NodeId, crate::runtime_compile::BoundaryCondition>>,
     state_cache: StageStateCache,
     rhs_scratch: RhsScratch,
 }
 
 struct Snapshot {
     solution: SteadySolution,
-    components: HashMap<CompId, Box<dyn TwoPortComponent>>,
 }
 
 impl TransientNetworkModel {
@@ -271,8 +286,8 @@ impl TransientNetworkModel {
         let log_mode = TransientLogMode::from_env();
 
         let schedules = build_schedule_data(&system.schedules);
-        let has_dynamic_schedules = !schedules.valve_events.is_empty()
-            || !schedules.boundary_pressure_events.is_empty()
+        let has_dynamic_component_schedules = !schedules.valve_events.is_empty();
+        let has_dynamic_boundary_schedules = !schedules.boundary_pressure_events.is_empty()
             || !schedules.boundary_temperature_events.is_empty();
 
         let (control_volumes, cv_node_ids, cv_index_by_node, cv_initial_states) =
@@ -356,6 +371,7 @@ impl TransientNetworkModel {
 
         // Initialize surrogate models (empty until first valid state)
         let cv_surrogate_models = vec![None; control_volumes.len()];
+        let cv_surrogate_anchor = vec![None; control_volumes.len()];
         let lv_surrogate_models = vec![None; line_volumes.len()];
 
         // Identify junction nodes (explicit Junction kind only; Atmosphere is fixed)
@@ -382,6 +398,28 @@ impl TransientNetworkModel {
         let num_lvs = line_volumes.len();
         let num_nodes = runtime.graph.nodes().len();
 
+        let static_boundaries = if has_dynamic_boundary_schedules {
+            None
+        } else {
+            Some(
+                runtime_compile::parse_boundaries_with_atmosphere(
+                    system,
+                    &system.boundaries,
+                    &runtime.node_id_map,
+                )
+                .map_err(|e| AppError::TransientCompile {
+                    message: format!("Failed to parse static boundaries: {}", e),
+                })?,
+            )
+        };
+
+        let reusable_components = if has_dynamic_component_schedules {
+            HashMap::new()
+        } else {
+            build_components_with_schedules(system, &runtime.comp_id_map, &schedules, 0.0)
+                .map_err(|e| AppError::TransientCompile { message: e })?
+        };
+
         Ok(Self {
             system: system.clone(),
             runtime: SystemRuntime {
@@ -400,7 +438,8 @@ impl TransientNetworkModel {
             flow_routes,
             initial_state,
             schedules,
-            has_dynamic_schedules,
+            has_dynamic_component_schedules,
+            has_dynamic_boundary_schedules,
             last_steady_solution: None,
             last_cv_pressure,
             last_cv_enthalpy,
@@ -412,6 +451,7 @@ impl TransientNetworkModel {
             last_valve_positions,
             last_time: 0.0,
             cv_surrogate_models,
+            cv_surrogate_anchor,
             lv_surrogate_models,
             real_fluid_attempts: 0,
             real_fluid_successes: 0,
@@ -430,6 +470,8 @@ impl TransientNetworkModel {
             rhs_timing: RhsTimingBreakdown::default(),
             log_mode,
             execution_plan: None,
+            reusable_components,
+            static_boundaries,
             state_cache: StageStateCache::new(num_nodes),
             rhs_scratch: RhsScratch::new(num_cvs, num_lvs),
         })
@@ -493,6 +535,30 @@ impl TransientNetworkModel {
         self.rhs_timing.rhs_component_build_time_s
     }
 
+    pub fn rhs_plan_check_time_s(&self) -> f64 {
+        self.rhs_timing.rhs_plan_check_time_s
+    }
+
+    pub fn rhs_component_rebuild_time_s(&self) -> f64 {
+        self.rhs_timing.rhs_component_rebuild_time_s
+    }
+
+    pub fn rhs_snapshot_structure_setup_time_s(&self) -> f64 {
+        self.rhs_timing.rhs_snapshot_structure_setup_time_s
+    }
+
+    pub fn rhs_boundary_hydration_time_s(&self) -> f64 {
+        self.rhs_timing.rhs_boundary_hydration_time_s
+    }
+
+    pub fn rhs_direct_solve_setup_time_s(&self) -> f64 {
+        self.rhs_timing.rhs_direct_solve_setup_time_s
+    }
+
+    pub fn rhs_result_unpack_time_s(&self) -> f64 {
+        self.rhs_timing.rhs_result_unpack_time_s
+    }
+
     pub fn rhs_state_reconstruct_time_s(&self) -> f64 {
         self.rhs_timing.rhs_state_reconstruct_time_s
     }
@@ -525,6 +591,30 @@ impl TransientNetworkModel {
         self.rhs_timing.rk4_bookkeeping_time_s
     }
 
+    pub fn execution_plan_checks(&self) -> usize {
+        self.rhs_timing.execution_plan_checks
+    }
+
+    pub fn execution_plan_unchanged(&self) -> usize {
+        self.rhs_timing.execution_plan_unchanged
+    }
+
+    pub fn component_rebuilds(&self) -> usize {
+        self.rhs_timing.component_rebuilds
+    }
+
+    pub fn component_reuses(&self) -> usize {
+        self.rhs_timing.component_reuses
+    }
+
+    pub fn snapshot_setup_rebuilds(&self) -> usize {
+        self.rhs_timing.snapshot_setup_rebuilds
+    }
+
+    pub fn snapshot_setup_reuses(&self) -> usize {
+        self.rhs_timing.snapshot_setup_reuses
+    }
+
     /// Print transient simulation diagnostics.
     pub fn print_diagnostics(&self) {
         eprintln!("\n========== TRANSIENT SIMULATION DIAGNOSTICS ==========");
@@ -548,6 +638,18 @@ impl TransientNetworkModel {
         eprintln!(
             "Fallback activations (surrogate use): {}",
             self.fallback_uses
+        );
+        eprintln!(
+            "Execution-plan checks / unchanged:   {} / {}",
+            self.rhs_timing.execution_plan_checks, self.rhs_timing.execution_plan_unchanged
+        );
+        eprintln!(
+            "Component rebuilds / reuses:         {} / {}",
+            self.rhs_timing.component_rebuilds, self.rhs_timing.component_reuses
+        );
+        eprintln!(
+            "Snapshot setup rebuilds / reuses:    {} / {}",
+            self.rhs_timing.snapshot_setup_rebuilds, self.rhs_timing.snapshot_setup_reuses
         );
         if self.fallback_uses > 0 {
             eprintln!(
@@ -674,6 +776,10 @@ impl TransientNetworkModel {
     /// Ensure execution plan is built and matches current valve positions.
     /// Returns true if plan was rebuilt, false if reused.
     fn ensure_execution_plan(&mut self, time_s: f64) -> Result<bool, String> {
+        if !self.has_dynamic_component_schedules && self.execution_plan.is_some() {
+            return Ok(false);
+        }
+
         // Compute current valve positions from schedules
         let mut current_valve_positions = HashMap::new();
         for component in &self.system.components {
@@ -711,14 +817,19 @@ impl TransientNetworkModel {
         let _timer = Timer::start("transient_snapshot_solve");
         let mut surrogate_time_s = 0.0;
 
-        // Ensure execution plan is up-to-date (tracks valve positions)
-        let component_build_started = Instant::now();
+        self.rhs_timing.execution_plan_checks += 1;
+
+        let plan_check_started = Instant::now();
         let plan_rebuilt = self
             .ensure_execution_plan(time_s)
             .map_err(|e| SimError::Backend { message: e })?;
+        let plan_check_elapsed = plan_check_started.elapsed().as_secs_f64();
+        self.rhs_timing.rhs_plan_check_time_s += plan_check_elapsed;
+        if !plan_rebuilt {
+            self.rhs_timing.execution_plan_unchanged += 1;
+        }
 
-        // Rebuild components from execution plan
-        // Note: We still need to rebuild because SteadyProblem takes ownership
+        let component_rebuild_started = Instant::now();
         let mut components_for_problem = build_components_with_schedules(
             &self.system,
             &self.runtime.comp_id_map,
@@ -726,14 +837,16 @@ impl TransientNetworkModel {
             time_s,
         )
         .map_err(|e| SimError::Backend { message: e })?;
-
-        self.rhs_timing.rhs_component_build_time_s +=
-            component_build_started.elapsed().as_secs_f64();
+        let component_rebuild_elapsed = component_rebuild_started.elapsed().as_secs_f64();
+        self.rhs_timing.rhs_component_rebuild_time_s += component_rebuild_elapsed;
+        self.rhs_timing.component_rebuilds += 1;
+        self.rhs_timing.snapshot_setup_rebuilds += 1;
 
         if plan_rebuilt && self.log_mode.is_verbose() {
             eprintln!("[PLAN] Detected valve position change at t={:.6}s", time_s);
         }
 
+        let structure_setup_started = Instant::now();
         let mut problem = SteadyProblem::new(
             &self.runtime.graph,
             self.fluid_model.as_ref(),
@@ -743,29 +856,36 @@ impl TransientNetworkModel {
         for (comp_id, component) in components_for_problem.drain() {
             problem.add_component(comp_id, component)?;
         }
+        let structure_setup_elapsed = structure_setup_started.elapsed().as_secs_f64();
+        self.rhs_timing.rhs_snapshot_structure_setup_time_s += structure_setup_elapsed;
 
-        let boundaries = if self.has_dynamic_schedules {
+        let boundary_hydration_started = Instant::now();
+        let dynamic_boundaries = if self.has_dynamic_boundary_schedules {
             let boundary_defs = apply_boundary_schedules(&self.system, &self.schedules, time_s);
-            runtime_compile::parse_boundaries_with_atmosphere(
-                &self.system,
-                &boundary_defs,
-                &self.runtime.node_id_map,
+            Some(
+                runtime_compile::parse_boundaries_with_atmosphere(
+                    &self.system,
+                    &boundary_defs,
+                    &self.runtime.node_id_map,
+                )
+                .map_err(|e| SimError::Backend {
+                    message: format!("Failed to parse boundaries: {}", e),
+                })?,
             )
-            .map_err(|e| SimError::Backend {
-                message: format!("Failed to parse boundaries: {}", e),
-            })?
         } else {
-            runtime_compile::parse_boundaries_with_atmosphere(
-                &self.system,
-                &self.system.boundaries,
-                &self.runtime.node_id_map,
-            )
-            .map_err(|e| SimError::Backend {
-                message: format!("Failed to parse static boundaries: {}", e),
-            })?
+            None
+        };
+        let boundaries = if let Some(ref boundaries) = dynamic_boundaries {
+            boundaries
+        } else {
+            self.static_boundaries
+                .as_ref()
+                .ok_or_else(|| SimError::Backend {
+                    message: "Missing cached static boundaries".to_string(),
+                })?
         };
 
-        for (node_id, bc) in &boundaries {
+        for (node_id, bc) in boundaries {
             match bc {
                 crate::runtime_compile::BoundaryCondition::PT { p, t } => {
                     problem.set_pressure_bc(*node_id, *p)?;
@@ -777,6 +897,15 @@ impl TransientNetworkModel {
                 }
             }
         }
+        let boundary_hydration_elapsed = boundary_hydration_started.elapsed().as_secs_f64();
+        self.rhs_timing.rhs_boundary_hydration_time_s += boundary_hydration_elapsed;
+
+        self.rhs_timing.rhs_component_build_time_s += plan_check_elapsed
+            + component_rebuild_elapsed
+            + structure_setup_elapsed
+            + boundary_hydration_elapsed;
+
+        let direct_setup_started = Instant::now();
 
         // Apply control-volume boundaries
         for (idx, &node_id) in self.cv_node_ids.iter().enumerate() {
@@ -801,21 +930,32 @@ impl TransientNetworkModel {
                     self.last_cv_pressure[idx] = Some(p);
                     self.last_cv_enthalpy[idx] = Some(h); // Store actual h
 
-                    // Build/update surrogate for future fallback
-                    if let Ok(valid_state) = self
-                        .fluid_model
-                        .state(tf_fluids::StateInput::PH { p, h }, cv.composition.clone())
-                    {
-                        if let Ok(cp_val) = self.fluid_model.cp(&valid_state) {
-                            let t = valid_state.temperature();
-                            let rho = cv.density(cv_state);
-                            let molar_mass = cv.composition.molar_mass();
+                    let should_refresh_surrogate = match self.cv_surrogate_anchor[idx] {
+                        None => true,
+                        Some((prev_p, prev_h)) => {
+                            relative_change(p.value, prev_p.value) > 0.05
+                                || relative_change(h, prev_h) > 0.05
+                        }
+                    };
 
-                            let surrogate = tf_fluids::surrogate::FrozenPropertySurrogate::new(
-                                p.value, t.value, h, rho, cp_val, molar_mass,
-                            );
+                    // Build/update surrogate only when state changes materially.
+                    if should_refresh_surrogate {
+                        if let Ok(valid_state) = self
+                            .fluid_model
+                            .state(tf_fluids::StateInput::PH { p, h }, cv.composition.clone())
+                        {
+                            if let Ok(cp_val) = self.fluid_model.cp(&valid_state) {
+                                let t = valid_state.temperature();
+                                let rho = cv.density(cv_state);
+                                let molar_mass = cv.composition.molar_mass();
 
-                            self.cv_surrogate_models[idx] = Some(surrogate);
+                                let surrogate = tf_fluids::surrogate::FrozenPropertySurrogate::new(
+                                    p.value, t.value, h, rho, cp_val, molar_mass,
+                                );
+
+                                self.cv_surrogate_models[idx] = Some(surrogate);
+                                self.cv_surrogate_anchor[idx] = Some((p, h));
+                            }
                         }
                     }
 
@@ -1244,6 +1384,10 @@ impl TransientNetworkModel {
             (fallback_policy, populated_count)
         };
 
+        let direct_setup_elapsed = direct_setup_started.elapsed().as_secs_f64();
+        self.rhs_timing.rhs_direct_solve_setup_time_s += direct_setup_elapsed;
+        self.rhs_timing.rhs_component_build_time_s += direct_setup_elapsed;
+
         // Apply continuation strategy if needed
         let solution = if needs_continuation {
             const BASE_SUBSTEPS: usize = 20; // Increased from 12 to be more aggressive from start
@@ -1330,7 +1474,7 @@ impl TransientNetworkModel {
                     }
 
                     // Apply same boundary conditions
-                    for (node_id, bc) in &boundaries {
+                    for (node_id, bc) in boundaries {
                         match bc {
                             crate::runtime_compile::BoundaryCondition::PT { p, t } => {
                                 substep_problem.set_pressure_bc(*node_id, *p)?;
@@ -1527,6 +1671,8 @@ impl TransientNetworkModel {
             })?
         };
 
+        let result_unpack_started = Instant::now();
+
         // Update tracked valve positions
         for component in &self.system.components {
             if let ComponentKind::Valve { position, .. } = &component.kind {
@@ -1543,6 +1689,7 @@ impl TransientNetworkModel {
 
         self.rhs_timing.rhs_surrogate_time_s += surrogate_time_s;
         let components_for_snapshot = std::mem::take(&mut problem.components);
+        self.reusable_components = components_for_snapshot;
         drop(problem);
 
         self.last_steady_solution = Some(solution.clone());
@@ -1552,12 +1699,13 @@ impl TransientNetworkModel {
 
         // Update junction thermal state using relaxed mixing (PHASE 2)
         // After hydraulic solve, relax junction enthalpies toward their mixed values
-        self.update_junction_thermal_state(&solution, time_s, &components_for_snapshot)?;
+        self.update_junction_thermal_state(&solution, time_s)?;
 
-        Ok(Snapshot {
-            solution,
-            components: components_for_snapshot,
-        })
+        let result_unpack_elapsed = result_unpack_started.elapsed().as_secs_f64();
+        self.rhs_timing.rhs_result_unpack_time_s += result_unpack_elapsed;
+        self.rhs_timing.rhs_component_build_time_s += result_unpack_elapsed;
+
+        Ok(Snapshot { solution })
     }
 
     fn store_solution_cache(&mut self, time_s: f64, solution: SteadySolution) {
@@ -1576,7 +1724,6 @@ impl TransientNetworkModel {
         &mut self,
         solution: &SteadySolution,
         time_s: f64,
-        _components: &HashMap<CompId, Box<dyn TwoPortComponent>>,
     ) -> SimResult<()> {
         // On first call, initialize junction enthalpies from solved state
         if self.junction_thermal_state.update_count == 0 {
@@ -1741,8 +1888,7 @@ impl TransientModel for TransientNetworkModel {
                     })?;
 
             let component_model =
-                snapshot
-                    .components
+                self.reusable_components
                     .get(comp_id)
                     .ok_or_else(|| SimError::Backend {
                         message: format!("Component model not found for {:?}", comp_id),
@@ -2625,6 +2771,11 @@ fn time_key(time_s: f64) -> i64 {
     (time_s * 1e9).round() as i64
 }
 
+fn relative_change(current: f64, previous: f64) -> f64 {
+    let denom = previous.abs().max(1.0);
+    ((current - previous).abs()) / denom
+}
+
 fn area_from_m2(value: f64) -> Area {
     Area::new::<square_meter>(value)
 }
@@ -2639,8 +2790,8 @@ mod tests {
     use tf_fluids::{Composition, CoolPropModel, Species};
     use tf_graph::GraphBuilder;
     use tf_project::schema::{
-        ComponentDef, ComponentKind, CompositionDef, FluidDef, NodeDef, NodeKind, SystemDef,
-        ValveLawDef,
+        ComponentDef, ComponentKind, CompositionDef, FluidDef, InitialCvDef, NodeDef, NodeKind,
+        SystemDef, ValveLawDef,
     };
 
     fn empty_schedules() -> ScheduleData {
@@ -2649,6 +2800,71 @@ mod tests {
             boundary_pressure_events: HashMap::new(),
             boundary_temperature_events: HashMap::new(),
         }
+    }
+
+    fn make_plan_test_model() -> TransientNetworkModel {
+        let system = SystemDef {
+            id: "sys".to_string(),
+            name: "sys".to_string(),
+            fluid: FluidDef {
+                composition: CompositionDef::Pure {
+                    species: "Nitrogen".to_string(),
+                },
+            },
+            nodes: vec![
+                NodeDef {
+                    id: "n1".to_string(),
+                    name: "n1".to_string(),
+                    kind: NodeKind::ControlVolume {
+                        volume_m3: 1.0,
+                        initial: InitialCvDef {
+                            mode: Some("PT".to_string()),
+                            p_pa: Some(200_000.0),
+                            t_k: Some(300.0),
+                            h_j_per_kg: None,
+                            m_kg: None,
+                        },
+                    },
+                },
+                NodeDef {
+                    id: "n2".to_string(),
+                    name: "n2".to_string(),
+                    kind: NodeKind::ControlVolume {
+                        volume_m3: 1.0,
+                        initial: InitialCvDef {
+                            mode: Some("PT".to_string()),
+                            p_pa: Some(101_325.0),
+                            t_k: Some(300.0),
+                            h_j_per_kg: None,
+                            m_kg: None,
+                        },
+                    },
+                },
+            ],
+            components: vec![ComponentDef {
+                id: "v1".to_string(),
+                name: "Valve".to_string(),
+                kind: ComponentKind::Valve {
+                    cd: 0.8,
+                    area_max_m2: 1e-4,
+                    position: 0.2,
+                    law: ValveLawDef::Linear,
+                    treat_as_gas: true,
+                },
+                from_node_id: "n1".to_string(),
+                to_node_id: "n2".to_string(),
+            }],
+            boundaries: vec![],
+            schedules: vec![],
+        };
+
+        let runtime = crate::runtime_compile::compile_system(&system).expect("compile system");
+        TransientNetworkModel::new(
+            &system,
+            &runtime,
+            tf_solver::InitializationStrategy::Relaxed,
+        )
+        .expect("build transient model")
     }
 
     #[test]
@@ -2759,5 +2975,28 @@ mod tests {
         assert!(problem.bc_enthalpy[n1.index() as usize].is_some());
         assert!(problem.bc_pressure[n2.index() as usize].is_some());
         assert!(problem.bc_enthalpy[n2.index() as usize].is_some());
+    }
+
+    #[test]
+    fn execution_plan_rebuild_triggers_on_valve_change() {
+        let mut model = make_plan_test_model();
+        model.has_dynamic_component_schedules = true;
+        model
+            .schedules
+            .valve_events
+            .insert("v1".to_string(), vec![(1.0, 0.9)]);
+
+        assert!(model.ensure_execution_plan(0.0).expect("initial plan"));
+        assert!(!model.ensure_execution_plan(0.5).expect("unchanged plan"));
+        assert!(model.ensure_execution_plan(1.5).expect("changed plan"));
+    }
+
+    #[test]
+    fn execution_plan_stays_reused_without_dynamic_component_schedules() {
+        let mut model = make_plan_test_model();
+
+        assert!(model.ensure_execution_plan(0.0).expect("initial plan"));
+        assert!(!model.ensure_execution_plan(0.25).expect("reuse plan"));
+        assert!(!model.ensure_execution_plan(1.0).expect("reuse plan"));
     }
 }

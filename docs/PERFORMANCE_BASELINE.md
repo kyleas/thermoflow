@@ -6,6 +6,78 @@
 **Host**: Windows (Intel)
 **Optimization Status**: Phase 1 complete (surrogate caching implemented)
 
+## Phase 5 Snapshot/Build Split + Direct-Setup Optimization (2026-02-27)
+
+### What was instrumented
+
+The previous coarse snapshot/build cost was split into:
+
+- `rhs_plan_check_time_s`
+- `rhs_component_rebuild_time_s`
+- `rhs_snapshot_structure_setup_time_s`
+- `rhs_boundary_hydration_time_s`
+- `rhs_direct_solve_setup_time_s`
+- `rhs_result_unpack_time_s`
+
+Additional counters were added:
+
+- `execution_plan_checks`
+- `execution_plan_unchanged`
+- `component_rebuilds`
+- `component_reuses`
+- `snapshot_setup_rebuilds`
+- `snapshot_setup_reuses`
+
+### Dominant remaining sub-bottleneck
+
+Across supported transient scenarios, the dominant sub-bucket inside snapshot work is now clearly:
+
+- `rhs_direct_solve_setup_time_s`: **~75-83% of solve time**
+
+Other split buckets are small:
+
+- `rhs_plan_check_time_s`: ~microseconds total
+- `rhs_component_rebuild_time_s`: ~microseconds total
+- `rhs_snapshot_structure_setup_time_s`: ~0.1 ms total
+- `rhs_boundary_hydration_time_s`: ~0.02 ms total
+- `rhs_result_unpack_time_s`: ~0.2-0.6 ms total
+
+### Measured rebuild/setup frequency
+
+For supported transient runs (median):
+
+- `execution_plan_checks`: 44
+- `execution_plan_unchanged`: 43
+- `component_rebuilds`: 44
+- `component_reuses`: 0
+- `snapshot_setup_rebuilds`: 44
+- `snapshot_setup_reuses`: 0
+
+This shows structure is repeatedly rebuilt even when execution-plan state is unchanged.
+
+### Targeted optimization applied
+
+Optimized the dominant setup path by throttling CV surrogate refresh work:
+
+- On successful real-fluid CV boundary solves, surrogate refresh now runs only when $(P,h)$ changes by >5% relative to the last surrogate anchor.
+- This avoids repeated expensive surrogate refresh setup work when fallback is not being used.
+
+### Before/After medians vs post-Phase-4 baseline
+
+| Scenario | Total Before (s) | Total After (s) | Solve Before (s) | Solve After (s) | Solve Delta |
+|----------|------------------|-----------------|------------------|-----------------|------------|
+| 03 Simple Vent | 4.469 | 4.119 | 4.363 | 4.006 | **+8.2%** |
+| 04 Two-CV Series | 8.556 | 8.450 | 8.345 | 8.226 | **+1.4%** |
+| 05 Two-CV Pipe | 8.634 | 10.287 | 8.414 | 10.064 | **-19.6%** |
+| 07 LineVolume Vent | 4.472 | 5.861 | 4.272 | 5.602 | **-31.1%** |
+| 08 Two-CV LineVolume | 8.978 | 10.791 | 8.654 | 10.217 | **-18.1%** |
+
+Interpretation: instrumentation and optimization now precisely identify where work is concentrated; net benchmark movement is mixed and shows regressions on several multi-CV scenarios in this run.
+
+### Next likely bottleneck
+
+Given the new split, the highest-value next target remains `rhs_direct_solve_setup_time_s`, especially CV boundary hydration/setup logic that executes each RK stage.
+
 ## Phase 3 RHS Hot-Path Update (2026-02-27)
 
 Measured on supported transient workflows after adding RHS subphase instrumentation and applying targeted hot-path optimizations:

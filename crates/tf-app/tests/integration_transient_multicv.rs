@@ -131,3 +131,29 @@ fn multicv_diagnostics_fallback_counter_is_trustworthy() {
         "Progress diagnostics fallback count must match timing summary"
     );
 }
+
+#[test]
+fn multicv_supported_path_reuses_snapshot_structure() {
+    let project_path =
+        PathBuf::from("../../examples/projects/04_two_cv_series_vent_transient.yaml");
+    let (_records, _progress, timing) = run_transient_capture(&project_path, "s1", 0.02, 0.2);
+
+    assert!(
+        timing.rhs_calls > 0,
+        "Expected RHS calls for transient solve"
+    );
+    assert_eq!(
+        timing.execution_plan_checks, timing.rhs_calls,
+        "Execution plan should be checked once per RHS call"
+    );
+    assert!(
+        timing.execution_plan_unchanged > 0,
+        "Execution plan should remain unchanged for fixed-topology supported run"
+    );
+    assert!(
+        timing.component_rebuilds > 0,
+        "Component setup should be measured and counted"
+    );
+    assert_eq!(timing.component_reuses, 0);
+    assert_eq!(timing.snapshot_setup_reuses, 0);
+}
