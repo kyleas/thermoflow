@@ -12,6 +12,8 @@ fn examples_validate() {
         "examples/projects/01_orifice_steady.yaml",
         "examples/projects/02_tank_blowdown_transient.yaml",
         "examples/projects/03_turbopump_demo.yaml",
+        "examples/projects/09_pressure_controlled_vent.yaml",
+        "examples/projects/10_flow_controlled_valve.yaml",
     ];
 
     for rel in examples {

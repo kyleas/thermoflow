@@ -287,12 +287,15 @@ impl ThermoflowApp {
             components: vec![],
             boundaries: vec![],
             schedules: vec![],
+            controls: None,
         });
 
         project.layouts.push(LayoutDef {
             system_id: system_id.clone(),
             nodes: vec![],
             edges: vec![],
+            control_blocks: vec![],
+            signal_connections: vec![],
             overlay: OverlaySettingsDef::default(),
         });
 
@@ -528,6 +531,8 @@ impl ThermoflowApp {
             system_id: system_id.to_string(),
             nodes: vec![],
             edges: vec![],
+            control_blocks: vec![],
+            signal_connections: vec![],
             overlay: OverlaySettingsDef::default(),
         });
         let last = project.layouts.len() - 1;

@@ -45,6 +45,7 @@ fn make_system() -> SystemDef {
             enthalpy_j_per_kg: None,
         }],
         schedules: vec![],
+        controls: None,
     }
 }
 

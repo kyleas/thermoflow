@@ -29,6 +29,92 @@ pub struct SystemDef {
     pub boundaries: Vec<BoundaryDef>,
     #[serde(default)]
     pub schedules: Vec<ScheduleDef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controls: Option<ControlSystemDef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ControlSystemDef {
+    #[serde(default)]
+    pub blocks: Vec<ControlBlockDef>,
+    #[serde(default)]
+    pub connections: Vec<ControlConnectionDef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ControlBlockDef {
+    pub id: String,
+    pub name: String,
+    pub kind: ControlBlockKindDef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum ControlBlockKindDef {
+    Constant {
+        value: f64,
+    },
+    MeasuredVariable {
+        reference: MeasuredVariableDef,
+    },
+    PIController {
+        kp: f64,
+        ti_s: f64,
+        out_min: f64,
+        out_max: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        integral_limit: Option<f64>,
+        sample_period_s: f64,
+    },
+    PIDController {
+        kp: f64,
+        ti_s: f64,
+        td_s: f64,
+        td_filter_s: f64,
+        out_min: f64,
+        out_max: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        integral_limit: Option<f64>,
+        sample_period_s: f64,
+    },
+    FirstOrderActuator {
+        tau_s: f64,
+        rate_limit_per_s: f64,
+        #[serde(default = "default_actuator_initial_position")]
+        initial_position: f64,
+    },
+    ActuatorCommand {
+        component_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum MeasuredVariableDef {
+    NodePressure {
+        node_id: String,
+    },
+    NodeTemperature {
+        node_id: String,
+    },
+    EdgeMassFlow {
+        component_id: String,
+    },
+    PressureDrop {
+        from_node_id: String,
+        to_node_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ControlConnectionDef {
+    pub from_block_id: String,
+    pub to_block_id: String,
+    pub to_input: String,
+}
+
+fn default_actuator_initial_position() -> f64 {
+    0.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -213,12 +299,43 @@ pub struct PortDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ControlBlockLayout {
+    pub block_id: String,
+    pub x: f32,
+    pub y: f32,
+    #[serde(default)]
+    pub label_offset_x: f32,
+    #[serde(default)]
+    pub label_offset_y: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SignalConnectionRoute {
+    #[serde(default)]
+    pub from_block_id: String,
+    #[serde(default)]
+    pub to_block_id: String,
+    #[serde(default)]
+    pub to_input: String,
+    #[serde(default)]
+    pub points: Vec<RoutePointDef>,
+    #[serde(default)]
+    pub label_offset_x: f32,
+    #[serde(default)]
+    pub label_offset_y: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LayoutDef {
     pub system_id: String,
     #[serde(default)]
     pub nodes: Vec<NodeLayout>,
     #[serde(default)]
     pub edges: Vec<EdgeLayout>,
+    #[serde(default)]
+    pub control_blocks: Vec<ControlBlockLayout>,
+    #[serde(default)]
+    pub signal_connections: Vec<SignalConnectionRoute>,
     #[serde(default)]
     pub overlay: OverlaySettingsDef,
 }

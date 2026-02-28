@@ -94,6 +94,7 @@ thermoflow/
 │   ├── tf-components/         # Component models (orifice, pump, etc.)
 │   ├── tf-solver/             # Steady-state nonlinear solver
 │   ├── tf-sim/                # Transient integration solver
+│   ├── tf-controls/           # Control systems (signal graph, controllers, actuators)
 │   ├── tf-results/            # Run storage and caching
 │   └── tf-app/                # Shared application services (for CLI and GUI)
 ├── apps/
@@ -139,6 +140,7 @@ Compare results across multiple runs. Create parameter sweeps, sensitivity matri
 
 - Steady-state fluid network simulation
 - Transient simulation for fixed-topology systems (single-CV and supported multi-CV benchmarks)
+- Closed-loop transient controls (measured variable, sampled PI/PID, actuator-driven valve)
 - P&ID editor (basic node/component creation and editing)
 - Project file format (YAML)
 - Run caching and time-series storage
@@ -147,6 +149,11 @@ Compare results across multiple runs. Create parameter sweeps, sensitivity matri
 - RefProp-compatible fluid properties
 - Component models: orifice, pipe, pump, turbine, valve
 - Timed valve schedules remain explicitly unsupported (validation rejects them)
+
+### Control Examples
+
+- `examples/projects/09_pressure_controlled_vent.yaml` — pressure-regulated vent with PI + first-order actuator
+- `examples/projects/10_flow_controlled_valve.yaml` — mass-flow control with sampled PI + actuator lag/rate limit
 
 ### Planned
 
@@ -213,5 +220,5 @@ TBD
 
 ---
 
-**Status**: Active development (Phase 2 complete, Phase 3 in planning)  
-**Last updated**: 2026-02-26
+**Status**: Active development (Phase 2 complete; controls integrated for transient closed-loop path)  
+**Last updated**: 2026-02-27

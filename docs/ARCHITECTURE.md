@@ -169,6 +169,7 @@ Within that project, users switch between **workspaces**—specialized UI views�
 | **tf-components** | Component models | Orifice, pipe, pump, turbine, valve, LineVolume physics |
 | **tf-solver** | Steady solution | Linear/nonlinear system solving; steady-state simulator |
 | **tf-sim** | Transient | Integration schemes; transient simulator |
+| **tf-controls** | Control systems | Signal graph, controllers, actuators, sampled execution |
 | **tf-results** | Storage | Run manifests, time-series record storage, caching |
 | **tf-app** | Services | Shared application logic (no duplication between CLI/GUI) |
 
@@ -188,6 +189,105 @@ Within that project, users switch between **workspaces**—specialized UI views�
 | **tf-ui** | Desktop application with multiple workspaces |
 
 Both use **tf-app** for all business logic. Neither duplicates simulation, I/O, or caching.
+
+### 4.4 Control System Architecture
+
+Thermoflow includes a **separate signal/control domain** layered on top of the fluid network. Controls and actuation enable closed-loop system modeling where:
+
+- **Measured variables** extract quantities from the fluid system (pressure, temperature, flow)
+- **Controllers** process measurements and compute control actions (PI, PID)
+- **Actuators** introduce physical dynamics between controller output and system response (valve position lag, rate limiting)
+- **Sampled execution** models digital controller timing (discrete sample rates, zero-order hold)
+
+#### 4.4.1 Separation of Concerns
+
+The control graph is **separate from the fluid graph**:
+
+- **Fluid domain** (`tf-graph`, `tf-components`, `tf-solver`, `tf-sim`): Conservation equations, component physics, steady/transient integration
+- **Control domain** (`tf-controls`): Signal graph, controller blocks, actuator dynamics, sampled timing
+
+This separation ensures:
+- Clean architecture with clear responsibilities
+- Independent evolution of fluid and control models
+- Explicit measured-variable and actuator-command interfaces
+- Extensible signal processing (future: cascade control, feedforward, gain scheduling)
+
+#### 4.4.2 Signal Graph Model
+
+The control graph consists of:
+
+- **Signal blocks**: Sources (constants, measured variables), processors (controllers), sinks (actuator commands)
+- **Signal connections**: Directed edges carrying scalar (`f64`) signals
+- **Evaluation order**: Topological sort ensures all inputs are evaluated before processing
+
+Signal types are currently scalar (`f64` only). Future extensions may include vector signals or boolean/discrete signals.
+
+#### 4.4.3 Controller Execution
+
+Controllers operate in **sampled/digital mode**:
+
+- Each controller has a configurable sample period (e.g., 10 Hz → 0.1s period)
+- Controller updates occur only at sample times
+- Outputs are held constant between samples (zero-order hold)
+- Transient integrator may sub-step between controller updates
+
+This models realistic digital control systems where:
+- Sensors have finite sample rates
+- Control computers execute at discrete intervals
+- Physical actuators introduce continuous dynamics separate from discrete control logic
+
+#### 4.4.4 Actuator Dynamics
+
+Actuators model physical limitations:
+
+- **First-order lag**: Time constant `τ` models mechanical/electrical response time
+- **Rate limiting**: Maximum velocity constraint (e.g., valve motor speed)
+- **Position clamping**: Output bounded to [0, 1] for valve position
+
+Actuator integration occurs at the transient integrator timestep (continuous dynamics), separate from discrete controller execution.
+
+#### 4.4.5 tf-controls Crate Contents
+
+`tf-controls` provides:
+
+- `Signal`, `SignalId`, `SignalValue`: Signal type primitives
+- `ControlGraph`, `SignalEdge`, `BlockId`: Graph structure
+- `SignalBlock`, `SignalSource`, `SignalProcessor`, `SignalSink`: Block abstractions
+- `MeasuredVariableRef`: References to fluid system quantities
+- `PIController`, `PIDController`: Feedback controller implementations
+- `FirstOrderActuator`, `ActuatorState`: Valve/actuator dynamics
+- `SampleClock`, `SampleConfig`, `ZeroOrderHold`: Sampled execution primitives
+
+All control logic is backend-first and shared between CLI and GUI.
+
+#### 4.4.6 Control Schema and Runtime Wiring
+
+Control definitions live per-system under `system.controls` in project schema:
+
+- `controls.blocks[]`: constants, measured variables, PI/PID controllers, first-order actuators, actuator-command sinks
+- `controls.connections[]`: directed signal edges with explicit destination input ports (`setpoint`, `process`, `command`, `position`)
+
+Canonical backend path for transient closed-loop execution:
+
+1. `tf-project` validates control block parameters, references, connection topology, and graph acyclicity
+2. `tf-app::transient_compile::build_control_runtime()` compiles schema blocks into executable runtime blocks
+3. `TransientNetworkModel::solve_snapshot()` advances sampled controller/actuator state and applies valve position overrides
+4. Steady snapshot solve computes fluid response with updated valve positions
+5. Measured variables are extracted from solved fluid state and fed back to control graph
+6. Transient result records persist control histories in `global_values.control_values`
+
+Supported measured-variable references in this phase:
+
+- Node pressure
+- Node temperature
+- Edge mass flow
+- Pressure drop
+
+Intentionally unsupported in this phase:
+
+- Timed valve schedules (`ActionDef::SetValvePosition` remains validation-rejected)
+- GUI control-graph editing UX
+- Advanced controller structures (feedforward/cascade/gain scheduling)
 
 ## 5. Shared Services Principle
 

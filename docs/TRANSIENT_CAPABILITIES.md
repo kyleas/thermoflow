@@ -10,7 +10,31 @@ ThermoFlow's transient simulation support is under active development. This docu
 - **Simple CV venting to atmosphere**: CV with fixed orifice/valve to atmosphere node
 - **Fixed-topology multi-CV transients**: multiple control volumes with fixed components and no timed events
 - **Fixed component positions**: Valves with constant position throughout simulation
+- **Closed-loop control transients**: measured variable → sampled controller → actuator → valve position
 - **Fixed boundary conditions**: Atmosphere nodes with constant P and T
+
+### Closed-Loop Controls (Backend Canonical Path)
+
+Controls are now supported through a separate signal graph (`tf-controls`) integrated into the transient runtime:
+
+- **Supported block types**:
+  - Constant setpoint source
+  - Measured variable source
+  - PI/PID controller
+  - First-order actuator (lag + rate limit)
+  - Actuator command sink (valve position target)
+
+- **Supported measured variables**:
+  - Node pressure
+  - Node temperature
+  - Edge mass flow
+  - Pressure drop
+
+- **Execution model**:
+  - Controllers execute at discrete sample periods
+  - Controller outputs are held between samples (zero-order hold)
+  - Actuator dynamics evolve continuously at transient timestep
+  - Actuator output drives runtime valve position
 
 ### Numerical Methods
 - **RK4 integration** with adaptive timestep
@@ -76,6 +100,11 @@ Fallback activations (surrogate use): 0
 
 - `04_two_cv_series_vent_transient.yaml` — two control volumes in series with fixed valve + fixed outlet orifice
 - `05_two_cv_pipe_vent_transient.yaml` — tank + buffer control volume with fixed feed orifice + fixed outlet pipe
+
+### Supported Closed-Loop Control Examples
+
+- `09_pressure_controlled_vent.yaml` — tank pressure regulation with PI + actuator-driven vent valve
+- `10_flow_controlled_valve.yaml` — valve mass-flow tracking with PI + actuator lag/rate limit
 
 ### LineVolume Component (Finite-Volume Storage)
 

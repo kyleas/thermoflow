@@ -10,6 +10,7 @@ tf-fluids = { path = "../tf-fluids" }
 tf-components = { path = "../tf-components" }
 tf-solver = { path = "../tf-solver" }
 tf-sim = { path = "../tf-sim" }
+tf-controls = { path = "../tf-controls" }
 tf-project = { path = "../tf-project" }
 tf-results = { path = "../tf-results" }
 

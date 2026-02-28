@@ -1,7 +1,10 @@
 //! Integration tests for steady-state simulation end-to-end
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tf_app::{project_service, query, run_service, RunMode, RunOptions, RunRequest};
+
+static TEST_PROJECT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn clear_run_cache(project_path: &Path) {
     if let Some(project_dir) = project_path.parent() {
@@ -12,14 +15,32 @@ fn clear_run_cache(project_path: &Path) {
     }
 }
 
+fn prepare_test_project() -> PathBuf {
+    let source = Path::new("../../examples/projects/01_orifice_steady.yaml");
+    let temp_dir =
+        std::env::temp_dir().join(format!("tf_app_integration_steady_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let sequence = TEST_PROJECT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dest = temp_dir.join(format!(
+        "01_orifice_steady_{}_{}.yaml",
+        sequence,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::copy(source, &dest).expect("copy example project");
+    dest
+}
+
 #[test]
 fn test_steady_simulation_orifice() {
     // Path to example project
-    let project_path = Path::new("../../examples/projects/01_orifice_steady.yaml");
-    clear_run_cache(project_path);
+    let project_path = prepare_test_project();
+    clear_run_cache(&project_path);
 
     // Verify project loads and validates
-    let project = project_service::load_project(project_path).expect("Failed to load project");
+    let project = project_service::load_project(&project_path).expect("Failed to load project");
     project_service::validate_project(&project).expect("Project validation failed");
 
     // Get system
@@ -29,7 +50,7 @@ fn test_steady_simulation_orifice() {
 
     // Run steady simulation
     let request = RunRequest {
-        project_path,
+        project_path: &project_path,
         system_id: "s1",
         mode: RunMode::Steady,
         options: RunOptions {
@@ -45,7 +66,7 @@ fn test_steady_simulation_orifice() {
     // Verify run was saved
     let run_id = response.run_id.clone();
     let (manifest, records) =
-        run_service::load_run(project_path, &run_id).expect("Failed to load run");
+        run_service::load_run(&project_path, &run_id).expect("Failed to load run");
     assert_eq!(manifest.system_id, "s1");
     assert_eq!(manifest.solver_version, "0.1.0");
 
@@ -100,7 +121,7 @@ fn test_steady_simulation_orifice() {
     );
 
     // Verify runs listing
-    let runs = run_service::list_runs(project_path, "s1").expect("Failed to list runs");
+    let runs = run_service::list_runs(&project_path, "s1").expect("Failed to list runs");
     assert!(!runs.is_empty(), "Should have at least one run");
     assert!(
         runs.iter().any(|r| r.run_id == run_id),
@@ -110,12 +131,12 @@ fn test_steady_simulation_orifice() {
 
 #[test]
 fn test_steady_simulation_with_no_cache() {
-    let project_path = Path::new("../../examples/projects/01_orifice_steady.yaml");
-    clear_run_cache(project_path);
+    let project_path = prepare_test_project();
+    clear_run_cache(&project_path);
 
     // First run with cache enabled
     let request = RunRequest {
-        project_path,
+        project_path: &project_path,
         system_id: "s1",
         mode: RunMode::Steady,
         options: RunOptions {
@@ -131,7 +152,7 @@ fn test_steady_simulation_with_no_cache() {
     // Second run with cache disabled should NOT load from cache
     // (but will produce same run_id and overwrite)
     let request_no_cache = RunRequest {
-        project_path,
+        project_path: &project_path,
         system_id: "s1",
         mode: RunMode::Steady,
         options: RunOptions {

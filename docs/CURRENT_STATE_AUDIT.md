@@ -22,6 +22,7 @@
 | **tf-components** | Physics models | Component behavior (orifice, pipe, pump, turbine, valve, LineVolume) | ✅ Canonical | `TwoPortComponent`, `Orifice`, `Pipe`, `Pump`, `Turbine`, `Valve`, `LineVolume` |
 | **tf-solver** | Steady solver | Newton-based system solver for (P,h) unknowns | ✅ Canonical | `SteadyProblem`, `solve()`, `solve_with_progress()`, `NewtonConfig`, `InitializationStrategy` |
 | **tf-sim** | Transient solver | RK4/Euler integration with embedded steady solve | ✅ Canonical | `TransientModel`, `run_sim()`, `run_sim_with_progress()`, `ControlVolume` |
+| **tf-controls** | Control systems | Signal graph, controllers, actuators, sampled execution | ✅ Initial | `ControlGraph`, `PIController`, `PIDController`, `FirstOrderActuator`, `SampleClock`, `MeasuredVariableRef` |
 | **tf-results** | Persistence | Run caching, manifest storage, time-series JSONL | ✅ Canonical | `RunStore`, `compute_run_id()`, `RunManifest`, `TimeseriesRecord` |
 | **tf-app** | Services | Project I/O, runtime compilation, run execution, caching, progress API | ✅ Canonical | `ensure_run()`, `compile_system()`, `load_project()`, `RunProgressEvent` |
 
@@ -659,12 +660,16 @@ When CoolProp fails:
 | **Real-fluid thermodynamics** | ✅ Supported | CoolProp integration for accurate state | All examples |
 | **Run caching** | ✅ Supported | Deterministic run ID, cache hit detection | All runs (implicit) |
 | **Progress reporting** | ✅ Supported | Stage, elapsed time, iteration/fraction details | CLI: visible live, GUI: status panel |
+| **Closed-loop control graph** | ✅ Supported | Separate control domain compiled from system `controls` schema | `09_pressure_controlled_vent.yaml`, `10_flow_controlled_valve.yaml` |
+| **Sampled PI/PID control execution** | ✅ Supported | Discrete sample clocks with zero-order hold outputs | `09_pressure_controlled_vent.yaml`, `10_flow_controlled_valve.yaml` |
+| **Measured-variable extraction** | ✅ Supported | Node pressure/temp, edge mass flow, pressure drop | `09_pressure_controlled_vent.yaml`, `10_flow_controlled_valve.yaml` |
+| **Actuator-driven valve position** | ✅ Supported | First-order actuator output drives runtime valve position | `09_pressure_controlled_vent.yaml`, `10_flow_controlled_valve.yaml` |
 | **Timed valve schedules** | ❌ Unsupported | Explicit validation error | `unsupported/02_tank_blowdown_scheduled.yaml` |
 | **Dynamic topology changes** | ❌ Unsupported | Valve opening/closing during transient | Not testable (blocked by validation) |
 | **Continuation method for valve transients** | ⚠️ Experimental | Substep retry logic present, but insufficient | (`02_tank_blowdown_transient.yaml` fails convergence) |
 | **Junction-heavy multi-CV startup** | ⚠️ Experimental | Startup can still be sensitive in strongly coupled junction networks | (`06_two_cv_junction_vent_transient.yaml`) |
 | **Shaft/rotating machinery dynamics** | ⚠️ Defined | `Shaft` struct exists in tf-sim, not integrated into solver | Not usable |
-| **Actuator first-order dynamics** | ⚠️ Defined | `FirstOrderActuator` exists in tf-sim, not used | Not usable |
+| **Actuator first-order dynamics** | ✅ Supported | `FirstOrderActuator` in tf-controls, wired into transient runtime | `09_pressure_controlled_vent.yaml`, `10_flow_controlled_valve.yaml` |
 
 ---
 
@@ -779,7 +784,7 @@ Use fixed valve positions for now.
 | Feature | Location | Status | Notes |
 |---------|----------|--------|-------|
 | **Shaft/rotating machinery** | `tf-sim::Shaft`, `tf-sim::ShaftState` | Defined, not integrated | Struct exists; not wired into transient solver |
-| **Actuator dynamics** | `tf-sim::FirstOrderActuator` | Defined, not used | `dpos/dt = (target - pos)/tau`; all test cases use fixed position |
+| **Actuator dynamics** | `tf-controls::FirstOrderActuator` | Integrated | Used by sampled control runtime to drive valve position |
 | **Pressure drop model in pipe** | `tf-components::Pipe` | Partial | `mdot(state)` implemented; Q not handled; inverse problem (mdot → ΔP) missing |
 
 ---

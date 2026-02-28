@@ -1,5 +1,5 @@
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
-use tf_project::schema::{ComponentKind, NodeKind};
+use tf_project::schema::{ComponentKind, ControlBlockKindDef, NodeKind};
 
 pub fn draw_node_symbol(
     painter: &egui::Painter,
@@ -92,5 +92,96 @@ pub fn draw_component_symbol(
             let rect = egui::Rect::from_center_size(center, Vec2::new(20.0, 12.0));
             painter.rect_stroke(rect, 0.0, Stroke::new(2.0, color));
         }
+    }
+}
+
+#[allow(dead_code)]
+pub fn draw_control_block_symbol(
+    painter: &egui::Painter,
+    block_kind: &ControlBlockKindDef,
+    center: Pos2,
+    color: Color32,
+) {
+    let half_w = 20.0;
+    let half_h = 14.0;
+
+    // All control blocks are rounded rectangles
+    let rect = Rect::from_center_size(center, Vec2::new(half_w * 2.0, half_h * 2.0));
+    painter.rect_stroke(rect, 4.0, Stroke::new(2.0, color));
+
+    // Draw type-specific icon inside
+    match block_kind {
+        ControlBlockKindDef::Constant { .. } => {
+            // Draw "K" for constant
+            painter.text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                "K",
+                egui::FontId::proportional(12.0),
+                color,
+            );
+        }
+        ControlBlockKindDef::MeasuredVariable { .. } => {
+            // Draw "M" for measured variable
+            painter.text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                "M",
+                egui::FontId::proportional(12.0),
+                color,
+            );
+        }
+        ControlBlockKindDef::PIController { .. } => {
+            // Draw "PI" for PI controller
+            painter.text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                "PI",
+                egui::FontId::proportional(10.0),
+                color,
+            );
+        }
+        ControlBlockKindDef::PIDController { .. } => {
+            // Draw "PID" for PID controller
+            painter.text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                "PD",
+                egui::FontId::proportional(10.0),
+                color,
+            );
+        }
+        ControlBlockKindDef::FirstOrderActuator { .. } => {
+            // Draw "A" for actuator
+            painter.text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                "A",
+                egui::FontId::proportional(12.0),
+                color,
+            );
+        }
+        ControlBlockKindDef::ActuatorCommand { .. } => {
+            // Draw "Cmd" for command
+            painter.text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                "C",
+                egui::FontId::proportional(12.0),
+                color,
+            );
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn get_control_block_type_label(block_kind: &ControlBlockKindDef) -> &'static str {
+    match block_kind {
+        ControlBlockKindDef::Constant { .. } => "Constant",
+        ControlBlockKindDef::MeasuredVariable { .. } => "Measured",
+        ControlBlockKindDef::PIController { .. } => "PI Controller",
+        ControlBlockKindDef::PIDController { .. } => "PID Controller",
+        ControlBlockKindDef::FirstOrderActuator { .. } => "Actuator",
+        ControlBlockKindDef::ActuatorCommand { .. } => "Command",
     }
 }

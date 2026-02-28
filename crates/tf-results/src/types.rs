@@ -50,5 +50,14 @@ pub struct EdgeValueSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GlobalValueSnapshot {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub control_values: Vec<ControlValueSnapshot>,
     pub omega_rad_s: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlValueSnapshot {
+    pub id: String,
+    pub kind: String,
+    pub value: f64,
 }

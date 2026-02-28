@@ -11,6 +11,10 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use tf_components::{LineVolume, Orifice, Pipe, Pump, Turbine, TwoPortComponent, Valve, ValveLaw};
+use tf_controls::{
+    ActuatorState, FirstOrderActuator, PIController, PIControllerState, PIDController,
+    PIDControllerState, SampleClock, SampleConfig,
+};
 use tf_core::timing::Timer;
 use tf_core::units::{kgps, m, pa, Area, DynVisc, Pressure, Temperature};
 use tf_core::{CompId, NodeId};
@@ -18,8 +22,8 @@ use tf_fluids::{
     Composition, FluidModel, FrozenPropertySurrogate, SpecEnthalpy, StateInput, ThermoState,
 };
 use tf_project::schema::{
-    ActionDef, BoundaryDef, ComponentDef, ComponentKind, NodeDef, NodeKind, ScheduleDef, SystemDef,
-    ValveLawDef,
+    ActionDef, BoundaryDef, ComponentDef, ComponentKind, ControlBlockKindDef, MeasuredVariableDef,
+    NodeDef, NodeKind, ScheduleDef, SystemDef, ValveLawDef,
 };
 use tf_project::CvInitMode;
 use tf_sim::{
@@ -213,6 +217,252 @@ struct TransientExecutionPlan {
     current_valve_positions: HashMap<String, f64>,
 }
 
+#[derive(Clone, Debug)]
+enum ControlRuntimeBlock {
+    Constant {
+        block_id: String,
+        value: f64,
+        output: f64,
+    },
+    Measured {
+        block_id: String,
+        reference: MeasuredVariableDef,
+        output: f64,
+    },
+    PI {
+        block_id: String,
+        controller: PIController,
+        state: PIControllerState,
+        clock: SampleClock,
+        held_output: f64,
+        process_input: Option<usize>,
+        setpoint_input: Option<usize>,
+    },
+    Pid {
+        block_id: String,
+        controller: PIDController,
+        state: PIDControllerState,
+        clock: SampleClock,
+        held_output: f64,
+        process_input: Option<usize>,
+        setpoint_input: Option<usize>,
+    },
+    FirstOrderActuator {
+        block_id: String,
+        actuator: FirstOrderActuator,
+        state: ActuatorState,
+        command_input: Option<usize>,
+        last_command: f64,
+    },
+    ActuatorCommand {
+        block_id: String,
+        component_id: String,
+        position_input: Option<usize>,
+        last_output: f64,
+    },
+}
+
+#[derive(Clone, Debug, Default)]
+struct ControlRuntime {
+    blocks: Vec<ControlRuntimeBlock>,
+    eval_order: Vec<usize>,
+    block_index_by_id: HashMap<String, usize>,
+    current_outputs: Vec<f64>,
+    valve_overrides: HashMap<String, f64>,
+    last_eval_time: Option<f64>,
+}
+
+impl ControlRuntime {
+    fn advance_from_cached_measurements(&mut self, time_s: f64) {
+        let dt = self
+            .last_eval_time
+            .map(|last| (time_s - last).max(0.0))
+            .unwrap_or(0.0);
+
+        if self.current_outputs.len() != self.blocks.len() {
+            self.current_outputs = vec![0.0; self.blocks.len()];
+        }
+
+        self.valve_overrides.clear();
+
+        for &idx in &self.eval_order {
+            let output;
+            match &mut self.blocks[idx] {
+                ControlRuntimeBlock::Constant {
+                    value, output: out, ..
+                } => {
+                    output = *value;
+                    *out = output;
+                }
+                ControlRuntimeBlock::Measured { output: out, .. } => {
+                    output = *out;
+                }
+                ControlRuntimeBlock::PI {
+                    controller,
+                    state,
+                    clock,
+                    held_output,
+                    process_input,
+                    setpoint_input,
+                    ..
+                } => {
+                    let pv = process_input
+                        .and_then(|src| self.current_outputs.get(src).copied())
+                        .unwrap_or(0.0);
+                    let sp = setpoint_input
+                        .and_then(|src| self.current_outputs.get(src).copied())
+                        .unwrap_or(0.0);
+
+                    if clock.should_sample(time_s) {
+                        let (next_state, out) = controller.update(state, pv, sp, clock.config.dt);
+                        *state = next_state;
+                        *held_output = out;
+                        clock.advance();
+                    }
+
+                    output = *held_output;
+                }
+                ControlRuntimeBlock::Pid {
+                    controller,
+                    state,
+                    clock,
+                    held_output,
+                    process_input,
+                    setpoint_input,
+                    ..
+                } => {
+                    let pv = process_input
+                        .and_then(|src| self.current_outputs.get(src).copied())
+                        .unwrap_or(0.0);
+                    let sp = setpoint_input
+                        .and_then(|src| self.current_outputs.get(src).copied())
+                        .unwrap_or(0.0);
+
+                    if clock.should_sample(time_s) {
+                        let (next_state, out) = controller.update(state, pv, sp, clock.config.dt);
+                        *state = next_state;
+                        *held_output = out;
+                        clock.advance();
+                    }
+
+                    output = *held_output;
+                }
+                ControlRuntimeBlock::FirstOrderActuator {
+                    actuator,
+                    state,
+                    command_input,
+                    last_command,
+                    ..
+                } => {
+                    let command = command_input
+                        .and_then(|src| self.current_outputs.get(src).copied())
+                        .unwrap_or(*last_command)
+                        .clamp(0.0, 1.0);
+                    *last_command = command;
+
+                    if dt > 0.0 {
+                        *state = actuator.step(state, dt, command);
+                    }
+
+                    output = state.position;
+                }
+                ControlRuntimeBlock::ActuatorCommand {
+                    component_id,
+                    position_input,
+                    last_output,
+                    ..
+                } => {
+                    let position = position_input
+                        .and_then(|src| self.current_outputs.get(src).copied())
+                        .unwrap_or(*last_output)
+                        .clamp(0.0, 1.0);
+                    *last_output = position;
+                    self.valve_overrides.insert(component_id.clone(), position);
+                    output = position;
+                }
+            }
+
+            self.current_outputs[idx] = output;
+        }
+
+        self.last_eval_time = Some(time_s);
+    }
+
+    fn refresh_measured_outputs<F>(&mut self, mut resolve: F)
+    where
+        F: FnMut(&MeasuredVariableDef) -> Result<f64, SimError>,
+    {
+        for block in &mut self.blocks {
+            if let ControlRuntimeBlock::Measured {
+                reference, output, ..
+            } = block
+            {
+                if let Ok(value) = resolve(reference) {
+                    *output = value;
+                }
+            }
+        }
+    }
+
+    fn global_snapshots(&self) -> Vec<tf_results::ControlValueSnapshot> {
+        let mut snapshots = Vec::with_capacity(self.blocks.len());
+        for block in &self.blocks {
+            match block {
+                ControlRuntimeBlock::Constant {
+                    block_id, output, ..
+                } => snapshots.push(tf_results::ControlValueSnapshot {
+                    id: block_id.clone(),
+                    kind: "constant".to_string(),
+                    value: *output,
+                }),
+                ControlRuntimeBlock::Measured {
+                    block_id, output, ..
+                } => snapshots.push(tf_results::ControlValueSnapshot {
+                    id: block_id.clone(),
+                    kind: "measured".to_string(),
+                    value: *output,
+                }),
+                ControlRuntimeBlock::PI {
+                    block_id,
+                    held_output,
+                    ..
+                } => snapshots.push(tf_results::ControlValueSnapshot {
+                    id: block_id.clone(),
+                    kind: "pi".to_string(),
+                    value: *held_output,
+                }),
+                ControlRuntimeBlock::Pid {
+                    block_id,
+                    held_output,
+                    ..
+                } => snapshots.push(tf_results::ControlValueSnapshot {
+                    id: block_id.clone(),
+                    kind: "pid".to_string(),
+                    value: *held_output,
+                }),
+                ControlRuntimeBlock::FirstOrderActuator {
+                    block_id, state, ..
+                } => snapshots.push(tf_results::ControlValueSnapshot {
+                    id: block_id.clone(),
+                    kind: "actuator_position".to_string(),
+                    value: state.position,
+                }),
+                ControlRuntimeBlock::ActuatorCommand {
+                    block_id,
+                    last_output,
+                    ..
+                } => snapshots.push(tf_results::ControlValueSnapshot {
+                    id: block_id.clone(),
+                    kind: "actuator_command".to_string(),
+                    value: *last_output,
+                }),
+            }
+        }
+
+        snapshots
+    }
+}
+
 pub struct TransientNetworkModel {
     system: SystemDef,
     runtime: SystemRuntime,
@@ -277,6 +527,8 @@ pub struct TransientNetworkModel {
     static_boundaries: Option<HashMap<NodeId, crate::runtime_compile::BoundaryCondition>>,
     state_cache: StageStateCache,
     rhs_scratch: RhsScratch,
+    control_runtime: Option<ControlRuntime>,
+    control_valve_overrides: HashMap<String, f64>,
 }
 
 struct Snapshot {
@@ -377,6 +629,18 @@ impl TransientNetworkModel {
             }
         }
 
+        let mut control_runtime =
+            build_control_runtime(system).map_err(|e| AppError::TransientCompile { message: e })?;
+        let mut control_valve_overrides = HashMap::new();
+        if let Some(runtime) = control_runtime.as_mut() {
+            runtime.refresh_measured_outputs(|_| Ok(0.0));
+            runtime.advance_from_cached_measurements(0.0);
+            control_valve_overrides = runtime.valve_overrides.clone();
+            for (component_id, position) in &control_valve_overrides {
+                last_valve_positions.insert(component_id.clone(), *position);
+            }
+        }
+
         // Initialize surrogate models (empty until first valid state)
         let cv_surrogate_models = vec![None; control_volumes.len()];
         let cv_surrogate_anchor = vec![None; control_volumes.len()];
@@ -424,8 +688,14 @@ impl TransientNetworkModel {
         let reusable_components = if has_dynamic_component_schedules {
             HashMap::new()
         } else {
-            build_components_with_schedules(system, &runtime.comp_id_map, &schedules, 0.0)
-                .map_err(|e| AppError::TransientCompile { message: e })?
+            build_components_with_valve_overrides(
+                system,
+                &runtime.comp_id_map,
+                &schedules,
+                0.0,
+                &control_valve_overrides,
+            )
+            .map_err(|e| AppError::TransientCompile { message: e })?
         };
 
         Ok(Self {
@@ -482,6 +752,8 @@ impl TransientNetworkModel {
             static_boundaries,
             state_cache: StageStateCache::new(num_nodes),
             rhs_scratch: RhsScratch::new(num_cvs, num_lvs),
+            control_runtime,
+            control_valve_overrides,
         })
     }
 
@@ -797,12 +1069,147 @@ impl TransientNetworkModel {
             }
         }
 
+        let control_values = self
+            .control_runtime
+            .as_ref()
+            .map(|runtime| runtime.global_snapshots())
+            .unwrap_or_default();
+
         Ok(TimeseriesRecord {
             time_s,
             node_values,
             edge_values,
-            global_values: GlobalValueSnapshot::default(),
+            global_values: GlobalValueSnapshot {
+                control_values,
+                ..GlobalValueSnapshot::default()
+            },
         })
+    }
+
+    fn extract_measured_value(
+        &self,
+        reference: &MeasuredVariableDef,
+        solution: &SteadySolution,
+    ) -> SimResult<f64> {
+        match reference {
+            MeasuredVariableDef::NodePressure { node_id } => {
+                let node =
+                    self.runtime
+                        .node_id_map
+                        .get(node_id)
+                        .ok_or_else(|| SimError::Backend {
+                            message: format!(
+                                "Unknown node id for pressure measurement: {}",
+                                node_id
+                            ),
+                        })?;
+                let idx = node.index() as usize;
+                solution
+                    .pressures
+                    .get(idx)
+                    .map(|p| p.value)
+                    .ok_or_else(|| SimError::Backend {
+                        message: format!("Missing pressure value for node '{}'", node_id),
+                    })
+            }
+            MeasuredVariableDef::NodeTemperature { node_id } => {
+                let node =
+                    self.runtime
+                        .node_id_map
+                        .get(node_id)
+                        .ok_or_else(|| SimError::Backend {
+                            message: format!(
+                                "Unknown node id for temperature measurement: {}",
+                                node_id
+                            ),
+                        })?;
+                let idx = node.index() as usize;
+                let p = *solution
+                    .pressures
+                    .get(idx)
+                    .ok_or_else(|| SimError::Backend {
+                        message: format!("Missing pressure value for node '{}'", node_id),
+                    })?;
+                let h = *solution
+                    .enthalpies
+                    .get(idx)
+                    .ok_or_else(|| SimError::Backend {
+                        message: format!("Missing enthalpy value for node '{}'", node_id),
+                    })?;
+                let thermo = self
+                    .fluid_model
+                    .state(StateInput::PH { p, h }, self.composition.clone())
+                    .or_else(|_| {
+                        ThermoState::from_pt(p, tf_core::units::k(300.0), self.composition.clone())
+                    })
+                    .map_err(|e| SimError::Backend {
+                        message: format!(
+                            "Failed to create state for node temperature measurement '{}': {}",
+                            node_id, e
+                        ),
+                    })?;
+                Ok(thermo.temperature().value)
+            }
+            MeasuredVariableDef::EdgeMassFlow { component_id } => {
+                let comp = self.runtime.comp_id_map.get(component_id).ok_or_else(|| {
+                    SimError::Backend {
+                        message: format!(
+                            "Unknown component id for flow measurement: {}",
+                            component_id
+                        ),
+                    }
+                })?;
+                let mdot_map: HashMap<CompId, f64> = solution.mass_flows.iter().copied().collect();
+                mdot_map
+                    .get(comp)
+                    .copied()
+                    .ok_or_else(|| SimError::Backend {
+                        message: format!(
+                            "Missing mass flow value for component '{}'",
+                            component_id
+                        ),
+                    })
+            }
+            MeasuredVariableDef::PressureDrop {
+                from_node_id,
+                to_node_id,
+            } => {
+                let from_node = self.runtime.node_id_map.get(from_node_id).ok_or_else(|| {
+                    SimError::Backend {
+                        message: format!("Unknown source node for pressure drop: {}", from_node_id),
+                    }
+                })?;
+                let to_node =
+                    self.runtime
+                        .node_id_map
+                        .get(to_node_id)
+                        .ok_or_else(|| SimError::Backend {
+                            message: format!(
+                                "Unknown destination node for pressure drop: {}",
+                                to_node_id
+                            ),
+                        })?;
+                let p_from = solution
+                    .pressures
+                    .get(from_node.index() as usize)
+                    .ok_or_else(|| SimError::Backend {
+                        message: format!(
+                            "Missing source pressure for pressure-drop measurement '{}'",
+                            from_node_id
+                        ),
+                    })?;
+                let p_to = solution
+                    .pressures
+                    .get(to_node.index() as usize)
+                    .ok_or_else(|| SimError::Backend {
+                        message: format!(
+                            "Missing destination pressure for pressure-drop measurement '{}'",
+                            to_node_id
+                        ),
+                    })?;
+                Ok(p_from.value - p_to.value)
+            }
+        }
     }
 
     /// Ensure execution plan is built and matches current valve positions.
@@ -821,6 +1228,9 @@ impl TransientNetworkModel {
                     if let Some(value) = last_event_value(events, time_s) {
                         pos = value;
                     }
+                }
+                if let Some(control_pos) = self.control_valve_overrides.get(&component.id) {
+                    pos = *control_pos;
                 }
                 current_valve_positions.insert(component.id.clone(), pos);
             }
@@ -849,6 +1259,13 @@ impl TransientNetworkModel {
         let _timer = Timer::start("transient_snapshot_solve");
         let mut surrogate_time_s = 0.0;
 
+        if let Some(control_runtime) = self.control_runtime.as_mut() {
+            control_runtime.advance_from_cached_measurements(time_s);
+            self.control_valve_overrides = control_runtime.valve_overrides.clone();
+        } else {
+            self.control_valve_overrides.clear();
+        }
+
         self.rhs_timing.execution_plan_checks += 1;
 
         let plan_check_started = Instant::now();
@@ -862,11 +1279,12 @@ impl TransientNetworkModel {
         }
 
         let component_rebuild_started = Instant::now();
-        let mut components_for_problem = build_components_with_schedules(
+        let mut components_for_problem = build_components_with_valve_overrides(
             &self.system,
             &self.runtime.comp_id_map,
             &self.schedules,
             time_s,
+            &self.control_valve_overrides,
         )
         .map_err(|e| SimError::Backend { message: e })?;
         let component_rebuild_elapsed = component_rebuild_started.elapsed().as_secs_f64();
@@ -1180,6 +1598,7 @@ impl TransientNetworkModel {
             &self.runtime.comp_id_map,
             &self.schedules,
             time_s,
+            &self.control_valve_overrides,
         );
 
         problem
@@ -1197,6 +1616,7 @@ impl TransientNetworkModel {
             ambient_p,
             ambient_h,
             &self.last_active_components,
+            &self.control_valve_overrides,
         )?;
 
         let active_components: HashSet<CompId> = active_components
@@ -1290,6 +1710,9 @@ impl TransientNetworkModel {
                     if let Some(value) = last_event_value(events, time_s) {
                         target_pos = value;
                     }
+                }
+                if let Some(control_pos) = self.control_valve_overrides.get(&component.id) {
+                    target_pos = *control_pos;
                 }
 
                 if let Some(&prev_pos) = self.last_valve_positions.get(&component.id) {
@@ -1564,6 +1987,7 @@ impl TransientNetworkModel {
                         ambient_p,
                         ambient_h,
                         &self.last_active_components,
+                        &valve_overrides,
                     )?;
 
                     let active_substep: HashSet<CompId> = active_components
@@ -1724,8 +2148,31 @@ impl TransientNetworkModel {
                         target_pos = value;
                     }
                 }
+                if let Some(control_pos) = self.control_valve_overrides.get(&component.id) {
+                    target_pos = *control_pos;
+                }
                 self.last_valve_positions
                     .insert(component.id.clone(), target_pos);
+            }
+        }
+
+        let mut measured_updates: Vec<(usize, f64)> = Vec::new();
+        if let Some(control_runtime) = self.control_runtime.as_ref() {
+            for (idx, block) in control_runtime.blocks.iter().enumerate() {
+                if let ControlRuntimeBlock::Measured { reference, .. } = block {
+                    if let Ok(value) = self.extract_measured_value(reference, &solution) {
+                        measured_updates.push((idx, value));
+                    }
+                }
+            }
+        }
+        if let Some(control_runtime) = self.control_runtime.as_mut() {
+            for (idx, value) in measured_updates {
+                if let Some(ControlRuntimeBlock::Measured { output, .. }) =
+                    control_runtime.blocks.get_mut(idx)
+                {
+                    *output = value;
+                }
             }
         }
 
@@ -2504,6 +2951,7 @@ fn apply_blocked_subgraph_bcs(
     ambient_p: Pressure,
     ambient_h: SpecEnthalpy,
     last_active_components: &HashSet<CompId>,
+    valve_position_overrides: &HashMap<String, f64>,
 ) -> SimResult<HashSet<CompId>> {
     let node_count = problem.graph.nodes().len();
     let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); node_count];
@@ -2515,7 +2963,7 @@ fn apply_blocked_subgraph_bcs(
             None => continue,
         };
 
-        if !component_is_active(component, schedules, time_s) {
+        if !component_is_active(component, schedules, time_s, valve_position_overrides) {
             continue;
         }
 
@@ -2612,6 +3060,7 @@ fn active_component_ids(
     comp_id_map: &HashMap<String, CompId>,
     schedules: &ScheduleData,
     time_s: f64,
+    valve_position_overrides: &HashMap<String, f64>,
 ) -> HashSet<CompId> {
     let mut active = HashSet::new();
     for component in &system.components {
@@ -2619,14 +3068,19 @@ fn active_component_ids(
             Some(id) => *id,
             None => continue,
         };
-        if component_is_active(component, schedules, time_s) {
+        if component_is_active(component, schedules, time_s, valve_position_overrides) {
             active.insert(comp_id);
         }
     }
     active
 }
 
-fn component_is_active(component: &ComponentDef, schedules: &ScheduleData, time_s: f64) -> bool {
+fn component_is_active(
+    component: &ComponentDef,
+    schedules: &ScheduleData,
+    time_s: f64,
+    valve_position_overrides: &HashMap<String, f64>,
+) -> bool {
     // Activation threshold for graph connectivity only.
     // This is distinct from the microscopic leakage floor used in component physics.
     const HYDRAULIC_ACTIVE_FACTOR: f64 = 1e-3;
@@ -2638,6 +3092,9 @@ fn component_is_active(component: &ComponentDef, schedules: &ScheduleData, time_
                 if let Some(value) = last_event_value(events, time_s) {
                     pos = value;
                 }
+            }
+            if let Some(value) = valve_position_overrides.get(&component.id) {
+                pos = *value;
             }
 
             let factor = match law {
@@ -2787,14 +3244,225 @@ fn build_components_with_valve_overrides(
     Ok(components)
 }
 
-fn build_components_with_schedules(
-    system: &SystemDef,
-    comp_id_map: &HashMap<String, CompId>,
-    schedules: &ScheduleData,
-    time_s: f64,
-) -> Result<HashMap<CompId, Box<dyn TwoPortComponent>>, String> {
-    // Use the override-capable version with empty overrides
-    build_components_with_valve_overrides(system, comp_id_map, schedules, time_s, &HashMap::new())
+fn build_control_runtime(system: &SystemDef) -> Result<Option<ControlRuntime>, String> {
+    let Some(controls) = &system.controls else {
+        return Ok(None);
+    };
+
+    if controls.blocks.is_empty() {
+        return Ok(None);
+    }
+
+    let mut runtime = ControlRuntime::default();
+
+    for block in &controls.blocks {
+        let index = runtime.blocks.len();
+        if runtime
+            .block_index_by_id
+            .insert(block.id.clone(), index)
+            .is_some()
+        {
+            return Err(format!("duplicate control block id '{}'", block.id));
+        }
+
+        let compiled = match &block.kind {
+            ControlBlockKindDef::Constant { value } => ControlRuntimeBlock::Constant {
+                block_id: block.id.clone(),
+                value: *value,
+                output: *value,
+            },
+            ControlBlockKindDef::MeasuredVariable { reference } => ControlRuntimeBlock::Measured {
+                block_id: block.id.clone(),
+                reference: reference.clone(),
+                output: 0.0,
+            },
+            ControlBlockKindDef::PIController {
+                kp,
+                ti_s,
+                out_min,
+                out_max,
+                integral_limit,
+                sample_period_s,
+            } => {
+                let mut controller = PIController::new(*kp, *ti_s, *out_min, *out_max)
+                    .map_err(|e| format!("PI controller '{}': {}", block.id, e))?;
+                if let Some(limit) = integral_limit {
+                    controller = controller.with_integral_limit(*limit);
+                }
+                ControlRuntimeBlock::PI {
+                    block_id: block.id.clone(),
+                    controller,
+                    state: PIControllerState::default(),
+                    clock: SampleClock::new(SampleConfig::new(*sample_period_s), 0.0),
+                    held_output: 0.0,
+                    process_input: None,
+                    setpoint_input: None,
+                }
+            }
+            ControlBlockKindDef::PIDController {
+                kp,
+                ti_s,
+                td_s,
+                td_filter_s,
+                out_min,
+                out_max,
+                integral_limit,
+                sample_period_s,
+            } => {
+                let mut controller =
+                    PIDController::new(*kp, *ti_s, *td_s, *td_filter_s, *out_min, *out_max)
+                        .map_err(|e| format!("PID controller '{}': {}", block.id, e))?;
+                if let Some(limit) = integral_limit {
+                    controller = controller.with_integral_limit(*limit);
+                }
+                ControlRuntimeBlock::Pid {
+                    block_id: block.id.clone(),
+                    controller,
+                    state: PIDControllerState::default(),
+                    clock: SampleClock::new(SampleConfig::new(*sample_period_s), 0.0),
+                    held_output: 0.0,
+                    process_input: None,
+                    setpoint_input: None,
+                }
+            }
+            ControlBlockKindDef::FirstOrderActuator {
+                tau_s,
+                rate_limit_per_s,
+                initial_position,
+            } => {
+                let actuator = FirstOrderActuator::new(*tau_s, *rate_limit_per_s)
+                    .map_err(|e| format!("actuator '{}': {}", block.id, e))?;
+                ControlRuntimeBlock::FirstOrderActuator {
+                    block_id: block.id.clone(),
+                    actuator,
+                    state: ActuatorState {
+                        position: *initial_position,
+                    },
+                    command_input: None,
+                    last_command: *initial_position,
+                }
+            }
+            ControlBlockKindDef::ActuatorCommand { component_id } => {
+                ControlRuntimeBlock::ActuatorCommand {
+                    block_id: block.id.clone(),
+                    component_id: component_id.clone(),
+                    position_input: None,
+                    last_output: 0.0,
+                }
+            }
+        };
+
+        runtime.blocks.push(compiled);
+    }
+
+    let mut adjacency = vec![Vec::<usize>::new(); runtime.blocks.len()];
+    let mut in_degree = vec![0usize; runtime.blocks.len()];
+
+    for connection in &controls.connections {
+        let from_idx = *runtime
+            .block_index_by_id
+            .get(&connection.from_block_id)
+            .ok_or_else(|| {
+                format!(
+                    "control connection references unknown from_block_id '{}'",
+                    connection.from_block_id
+                )
+            })?;
+        let to_idx = *runtime
+            .block_index_by_id
+            .get(&connection.to_block_id)
+            .ok_or_else(|| {
+                format!(
+                    "control connection references unknown to_block_id '{}'",
+                    connection.to_block_id
+                )
+            })?;
+
+        adjacency[from_idx].push(to_idx);
+        in_degree[to_idx] += 1;
+
+        match runtime.blocks.get_mut(to_idx) {
+            Some(ControlRuntimeBlock::PI {
+                process_input,
+                setpoint_input,
+                ..
+            }) => match connection.to_input.as_str() {
+                "process" => *process_input = Some(from_idx),
+                "setpoint" => *setpoint_input = Some(from_idx),
+                other => {
+                    return Err(format!(
+                        "unsupported PI input '{}' on block '{}'",
+                        other, connection.to_block_id
+                    ));
+                }
+            },
+            Some(ControlRuntimeBlock::Pid {
+                process_input,
+                setpoint_input,
+                ..
+            }) => match connection.to_input.as_str() {
+                "process" => *process_input = Some(from_idx),
+                "setpoint" => *setpoint_input = Some(from_idx),
+                other => {
+                    return Err(format!(
+                        "unsupported PID input '{}' on block '{}'",
+                        other, connection.to_block_id
+                    ));
+                }
+            },
+            Some(ControlRuntimeBlock::FirstOrderActuator { command_input, .. }) => {
+                if connection.to_input != "command" {
+                    return Err(format!(
+                        "unsupported actuator input '{}' on block '{}'",
+                        connection.to_input, connection.to_block_id
+                    ));
+                }
+                *command_input = Some(from_idx);
+            }
+            Some(ControlRuntimeBlock::ActuatorCommand { position_input, .. }) => {
+                if connection.to_input != "position" {
+                    return Err(format!(
+                        "unsupported actuator command input '{}' on block '{}'",
+                        connection.to_input, connection.to_block_id
+                    ));
+                }
+                *position_input = Some(from_idx);
+            }
+            _ => {
+                return Err(format!(
+                    "block '{}' does not accept inputs",
+                    connection.to_block_id
+                ));
+            }
+        }
+    }
+
+    let mut queue: Vec<usize> = in_degree
+        .iter()
+        .enumerate()
+        .filter(|(_, degree)| **degree == 0)
+        .map(|(idx, _)| idx)
+        .collect();
+    let mut order = Vec::with_capacity(runtime.blocks.len());
+
+    while let Some(idx) = queue.pop() {
+        order.push(idx);
+        for next in &adjacency[idx] {
+            in_degree[*next] -= 1;
+            if in_degree[*next] == 0 {
+                queue.push(*next);
+            }
+        }
+    }
+
+    if order.len() != runtime.blocks.len() {
+        return Err("control graph contains a cycle".to_string());
+    }
+
+    runtime.eval_order = order;
+    runtime.current_outputs = vec![0.0; runtime.blocks.len()];
+
+    Ok(Some(runtime))
 }
 
 fn last_event_value(events: &[(f64, f64)], time_s: f64) -> Option<f64> {
@@ -2898,6 +3566,7 @@ mod tests {
             }],
             boundaries: vec![],
             schedules: vec![],
+            controls: None,
         };
 
         let runtime = crate::runtime_compile::compile_system(&system).expect("compile system");
@@ -2926,13 +3595,23 @@ mod tests {
         };
 
         let schedules = empty_schedules();
-        assert!(!component_is_active(&valve, &schedules, 0.0));
+        assert!(!component_is_active(
+            &valve,
+            &schedules,
+            0.0,
+            &HashMap::new()
+        ));
 
         let mut valve_open = valve.clone();
         if let ComponentKind::Valve { position, .. } = &mut valve_open.kind {
             *position = 0.01;
         }
-        assert!(component_is_active(&valve_open, &schedules, 0.0));
+        assert!(component_is_active(
+            &valve_open,
+            &schedules,
+            0.0,
+            &HashMap::new()
+        ));
     }
 
     #[test]
@@ -2982,6 +3661,7 @@ mod tests {
             }],
             boundaries: Vec::new(),
             schedules: Vec::new(),
+            controls: None,
         };
 
         let mut comp_id_map = HashMap::new();
@@ -3009,6 +3689,7 @@ mod tests {
             ambient_p,
             ambient_h,
             &HashSet::new(), // No previously-active components in test
+            &HashMap::new(),
         )
         .expect("Blocked subgraph anchoring failed");
 

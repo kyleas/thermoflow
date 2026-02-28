@@ -41,6 +41,7 @@ mod tests {
             components: vec![],
             boundaries: vec![],
             schedules: vec![],
+            controls: None,
         };
 
         let run_type = crate::types::RunType::Steady;
@@ -66,6 +67,7 @@ mod tests {
             components: vec![],
             boundaries: vec![],
             schedules: vec![],
+            controls: None,
         };
 
         let system2 = SystemDef {
@@ -80,6 +82,7 @@ mod tests {
             components: vec![],
             boundaries: vec![],
             schedules: vec![],
+            controls: None,
         };
 
         let run_type = crate::types::RunType::Steady;

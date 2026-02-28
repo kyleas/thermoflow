@@ -630,12 +630,18 @@ fn execute_transient(
     );
 
     // Run transient simulation
+    let integrator = if system.controls.is_some() {
+        tf_sim::IntegratorType::ForwardEuler
+    } else {
+        tf_sim::IntegratorType::RK4
+    };
+
     let options = SimOptions {
         dt: dt_s,
         t_end: t_end_s,
         max_steps: 100_000,
         record_every: 1,
-        integrator: tf_sim::IntegratorType::RK4,
+        integrator,
         min_dt: (dt_s * 0.1).max(1.0e-6),
         max_retries: 8,
         cutback_factor: 0.5,

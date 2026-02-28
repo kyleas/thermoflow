@@ -321,6 +321,8 @@ fn layout_index_for_system(project: &mut Project, system_id: &str) -> usize {
         system_id: system_id.to_string(),
         nodes: Vec::new(),
         edges: Vec::new(),
+        control_blocks: Vec::new(),
+        signal_connections: Vec::new(),
         overlay: tf_project::schema::OverlaySettingsDef::default(),
     });
     project.layouts.len() - 1

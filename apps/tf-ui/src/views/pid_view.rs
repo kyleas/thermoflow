@@ -350,6 +350,13 @@ impl PidView {
                                 }
                                 self.update_routes_for_component(system, component_id);
                             }
+                            crate::pid_editor::DragTarget::ControlBlock { block_id } => {
+                                let clamped =
+                                    self.constrain_to_rect(pos + drag_state.drag_offset, rect);
+                                if let Some(block) = self.layout.control_blocks.get_mut(block_id) {
+                                    block.pos = clamped;
+                                }
+                            }
                         }
                     }
                 }
@@ -374,6 +381,13 @@ impl PidView {
                                     }
                                 }
                                 self.update_routes_for_component(system, component_id);
+                            }
+                            crate::pid_editor::DragTarget::ControlBlock { block_id } => {
+                                if let Some(block) = self.layout.control_blocks.get_mut(block_id) {
+                                    if self.grid_enabled {
+                                        block.pos = snap_to_grid(block.pos);
+                                    }
+                                }
                             }
                         }
                         should_save_layout = true;
@@ -609,6 +623,8 @@ impl PidView {
                 system_id: system_id.to_string(),
                 nodes: Vec::new(),
                 edges: Vec::new(),
+                control_blocks: Vec::new(),
+                signal_connections: Vec::new(),
                 overlay: tf_project::schema::OverlaySettingsDef::default(),
             };
             self.layout.apply_to_layout_def(&mut layout_def);

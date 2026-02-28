@@ -1,0 +1,117 @@
+version: 2
+name: "Pressure-Regulated Vent (Closed Loop)"
+systems:
+  - id: s1
+    name: "Pressure-Controlled Tank Vent"
+    fluid:
+      composition:
+        type: Pure
+        species: Nitrogen
+    nodes:
+      - id: n_tank
+        name: "Tank"
+        kind:
+          type: ControlVolume
+          volume_m3: 0.03
+          initial:
+            mode: PT
+            p_pa: 550000.0
+            t_k: 305.0
+      - id: n_ambient
+        name: "Ambient"
+        kind:
+          type: Atmosphere
+          pressure_pa: 101325.0
+          temperature_k: 300.0
+    components:
+      - id: v_vent
+        name: "Vent Valve"
+        kind:
+          type: Valve
+          cd: 0.82
+          area_max_m2: 0.00008
+          position: 0.2
+          law:
+            type: Linear
+          treat_as_gas: true
+        from_node_id: n_tank
+        to_node_id: n_ambient
+    boundaries: []
+    schedules: []
+    controls:
+      blocks:
+        - id: sp_pressure
+          name: "Pressure Setpoint"
+          kind:
+            type: Constant
+            value: 260000.0
+        - id: m_tank_pressure
+          name: "Tank Pressure"
+          kind:
+            type: MeasuredVariable
+            reference:
+              type: NodePressure
+              node_id: n_tank
+        - id: c_pressure_pi
+          name: "Pressure PI"
+          kind:
+            type: PIController
+            kp: 0.000004
+            ti_s: 0.8
+            out_min: 0.0
+            out_max: 1.0
+            sample_period_s: 0.05
+        - id: a_vent
+          name: "Vent Actuator"
+          kind:
+            type: FirstOrderActuator
+            tau_s: 0.2
+            rate_limit_per_s: 3.0
+            initial_position: 0.2
+        - id: sink_vent
+          name: "Vent Valve Command"
+          kind:
+            type: ActuatorCommand
+            component_id: v_vent
+      connections:
+        - from_block_id: sp_pressure
+          to_block_id: c_pressure_pi
+          to_input: setpoint
+        - from_block_id: m_tank_pressure
+          to_block_id: c_pressure_pi
+          to_input: process
+        - from_block_id: c_pressure_pi
+          to_block_id: a_vent
+          to_input: command
+        - from_block_id: a_vent
+          to_block_id: sink_vent
+          to_input: position
+modules: []
+layouts:
+  - system_id: s1
+    nodes:
+      - node_id: n_tank
+        x: 210.0
+        y: 220.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+      - node_id: n_ambient
+        x: 470.0
+        y: 220.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+    edges:
+      - component_id: v_vent
+        points:
+          - x: 210.0
+            y: 220.0
+          - x: 470.0
+            y: 220.0
+        label_offset_x: 0.0
+        label_offset_y: 0.0
+    overlay:
+      show_pressure: true
+      show_temperature: true
+      show_enthalpy: false
+      show_density: false
+      show_mass_flow: true

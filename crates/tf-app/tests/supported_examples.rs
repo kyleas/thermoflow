@@ -10,6 +10,8 @@ fn supported_examples_validate() {
         "../../examples/projects/03_simple_vent_transient.yaml",
         "../../examples/projects/04_two_cv_series_vent_transient.yaml",
         "../../examples/projects/05_two_cv_pipe_vent_transient.yaml",
+        "../../examples/projects/09_pressure_controlled_vent.yaml",
+        "../../examples/projects/10_flow_controlled_valve.yaml",
     ];
 
     for path in supported {

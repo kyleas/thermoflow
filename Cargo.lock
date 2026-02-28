@@ -3758,6 +3758,7 @@ dependencies = [
  "serde",
  "serde_yaml",
  "tf-components",
+ "tf-controls",
  "tf-core",
  "tf-fluids",
  "tf-graph",
@@ -3802,6 +3803,17 @@ dependencies = [
  "tf-core",
  "tf-fluids",
  "tf-graph",
+ "thiserror 1.0.69",
+ "uom",
+]
+
+[[package]]
+name = "tf-controls"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "tf-core",
  "thiserror 1.0.69",
  "uom",
 ]

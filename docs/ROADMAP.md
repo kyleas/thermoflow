@@ -63,6 +63,50 @@ Thermoflow evolves in seven phases, each building on the previous to add capabil
 
 ---
 
+## Phase 2A: Controls and Actuation Foundation
+
+**Timeline**: Core integration complete (2026-02-27)
+
+**Objective**: Add control system architecture for closed-loop transient simulations with measured variables, controllers, and actuator dynamics.
+
+**Key Deliverables (Foundation - Complete)**:
+- ✅ tf-controls crate with signal graph architecture
+- ✅ Separate control/signal domain distinct from fluid network
+- ✅ Scalar signal types and block abstractions (sources, processors, sinks)
+- ✅ PI and PID controller implementations with anti-windup
+- ✅ FirstOrderActuator with rate limiting and position clamping
+- ✅ Sampled execution primitives (SampleClock, ZeroOrderHold)
+- ✅ Measured variable reference definitions (node pressure/temperature, edge flow)
+- ✅ Comprehensive unit tests for all control primitives
+
+**Key Deliverables (Completed in this step)**:
+- ✅ Schema extensions for control blocks and control graph wiring in project YAML
+- ✅ Validation for references, malformed topology, parameter ranges, and graph cycles
+- ✅ Runtime control graph compilation in `tf-app::transient_compile`
+- ✅ Sampled controller execution integrated into transient loop
+- ✅ Measured-variable extraction from transient runtime state
+- ✅ Actuator output wired to runtime valve position overrides
+- ✅ Two end-to-end control examples (`09`, `10`)
+- ✅ Control history persistence in transient results
+
+**Key Deliverables (Remaining - Future)**:
+- GUI control graph editing and signal wiring UX
+- Dedicated control plotting/report views in GUI
+- Advanced control patterns (feedforward, cascade, gain scheduling)
+
+**Dependencies**: Phase 2 (transient simulation works)
+
+**Why it matters**:
+- Enables realistic control system modeling (valves don't just snap open/closed)
+- Models digital controller timing (sample rates, zero-order hold)
+- Physical actuator dynamics (lag, rate limiting)
+- Supports closed-loop pressure regulation, flow control, temperature control
+- Foundation for advanced control strategies (cascade, feedforward, model-based)
+
+**Status**: ✅ Backend closed-loop control path complete (GUI editing/reporting still pending)
+
+---
+
 ## Phase 3: P&ID Editor Maturity
 
 **Timeline**: ~2 months (2026-04 target)

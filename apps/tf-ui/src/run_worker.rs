@@ -21,7 +21,7 @@ pub enum WorkerMessage {
     Complete {
         run_id: String,
         loaded_from_cache: bool,
-        timing: RunTimingSummary,
+        timing: Box<RunTimingSummary>,
     },
     Error {
         message: String,
@@ -112,7 +112,7 @@ impl RunWorker {
         tx.send(WorkerMessage::Complete {
             run_id: response.run_id,
             loaded_from_cache: response.loaded_from_cache,
-            timing: response.timing,
+            timing: Box::new(response.timing),
         })?;
 
         Ok(())

@@ -66,6 +66,7 @@ fn roundtrip_yaml_simple_system() {
             enthalpy_j_per_kg: None,
         }],
         schedules: vec![],
+        controls: None,
     };
 
     let project = Project {
@@ -116,6 +117,7 @@ fn validation_fails_on_missing_node() {
         }],
         boundaries: vec![],
         schedules: vec![],
+        controls: None,
     };
 
     let project = Project {
