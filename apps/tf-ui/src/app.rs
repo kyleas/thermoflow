@@ -24,6 +24,7 @@ pub struct ThermoflowApp {
     selected_system_id: Option<String>,
     selected_node_id: Option<String>,
     selected_component_id: Option<String>,
+    selected_control_block_id: Option<String>,
     selected_run_id: Option<String>,
     active_view: ViewTab,
     pid_view: PidView,
@@ -68,6 +69,7 @@ impl ThermoflowApp {
             selected_system_id: None,
             selected_node_id: None,
             selected_component_id: None,
+            selected_control_block_id: None,
             selected_run_id: None,
             active_view: ViewTab::Pid,
             pid_view: PidView::default(),
@@ -109,6 +111,7 @@ impl ThermoflowApp {
         self.selected_system_id = None;
         self.selected_node_id = None;
         self.selected_component_id = None;
+        self.selected_control_block_id = None;
         self.system_runtime = None;
         self.pid_view.invalidate_layout();
     }
@@ -130,6 +133,7 @@ impl ThermoflowApp {
                     .map(|s| s.id.clone());
                 self.selected_node_id = None;
                 self.selected_component_id = None;
+                self.selected_control_block_id = None;
                 self.system_runtime = None;
                 self.pid_view.invalidate_layout();
                 self.recompile_system();
@@ -466,6 +470,8 @@ impl ThermoflowApp {
             if let Some(node_id) = self.add_node(&system_id, kind) {
                 self.selected_node_id = Some(node_id);
                 self.selected_component_id = None;
+                self.selected_control_block_id = None;
+                self.pid_view.clear_control_selection();
                 changed = true;
             }
         }
@@ -487,6 +493,8 @@ impl ThermoflowApp {
                     }
                 }
             }
+            self.selected_control_block_id = None;
+            self.pid_view.clear_control_selection();
             changed = true;
         }
 
@@ -494,6 +502,8 @@ impl ThermoflowApp {
             if let Some(component_id) = self.add_component(&system_id, spec) {
                 self.selected_component_id = Some(component_id);
                 self.selected_node_id = None;
+                self.selected_control_block_id = None;
+                self.pid_view.clear_control_selection();
                 changed = true;
             }
         }
@@ -511,6 +521,8 @@ impl ThermoflowApp {
                         }
                     }
                 }
+                self.selected_control_block_id = None;
+                self.pid_view.clear_control_selection();
                 changed = true;
             }
         }
@@ -736,6 +748,7 @@ impl eframe::App for ThermoflowApp {
                     self.selected_system_id = Some(id);
                     self.selected_node_id = None;
                     self.selected_component_id = None;
+                    self.selected_control_block_id = None;
                 }
                 if recompile_needed {
                     self.recompile_system();
@@ -747,6 +760,7 @@ impl eframe::App for ThermoflowApp {
                 self.selected_system_id = Some(system_id);
                 self.selected_node_id = None;
                 self.selected_component_id = None;
+                self.selected_control_block_id = None;
                 self.pid_view.invalidate_layout();
                 self.recompile_system();
                 self.validate_project_state();
@@ -764,6 +778,7 @@ impl eframe::App for ThermoflowApp {
                     self.selected_system_id = next_system;
                     self.selected_node_id = None;
                     self.selected_component_id = None;
+                    self.selected_control_block_id = None;
                     self.pid_view.invalidate_layout();
                     self.recompile_system();
                     self.validate_project_state();
@@ -780,6 +795,7 @@ impl eframe::App for ThermoflowApp {
                     &self.selected_system_id,
                     &self.selected_node_id,
                     &self.selected_component_id,
+                    &self.selected_control_block_id,
                     &mut self.pid_view,
                 )
             })
@@ -790,6 +806,8 @@ impl eframe::App for ThermoflowApp {
         if needs_update || needs_recompile {
             if needs_update {
                 self.pid_view.invalidate_layout();
+                self.validate_project_state();
+            } else if needs_recompile {
                 self.validate_project_state();
             }
             self.recompile_system();
@@ -811,12 +829,14 @@ impl eframe::App for ThermoflowApp {
                         ui,
                         &mut self.project,
                         &self.selected_system_id,
-                        &mut self.selected_node_id,
-                        &mut self.selected_component_id,
                         &self.selected_run_id,
                         &self.run_store,
                         self.inspect_view.overlay_settings(),
                     );
+                    // Sync selection from PidView to App for inspector panel
+                    self.selected_node_id = self.pid_view.selected_node();
+                    self.selected_component_id = self.pid_view.selected_component();
+                    self.selected_control_block_id = self.pid_view.selected_control_block_id();
                 }
                 ViewTab::Modules => {
                     self.module_view.show(ui, &mut self.project);

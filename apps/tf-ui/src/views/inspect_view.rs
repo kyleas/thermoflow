@@ -1,5 +1,6 @@
 use tf_project::schema::{
-    BoundaryDef, ComponentDef, ComponentKind, NodeDef, NodeKind, OverlaySettingsDef, Project,
+    BoundaryDef, ComponentDef, ComponentKind, ControlBlockDef, ControlBlockKindDef,
+    MeasuredVariableDef, NodeDef, NodeKind, OverlaySettingsDef, Project,
 };
 
 use crate::views::pid_view::PidView;
@@ -62,6 +63,7 @@ impl InspectView {
         &self.overlay
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -69,6 +71,7 @@ impl InspectView {
         selected_system_id: &Option<String>,
         selected_node_id: &Option<String>,
         selected_component_id: &Option<String>,
+        selected_control_block_id: &Option<String>,
         pid_view: &mut PidView,
     ) -> InspectActions {
         let mut actions = InspectActions::default();
@@ -90,6 +93,14 @@ impl InspectView {
 
         if let Some(system) = proj.systems.iter_mut().find(|s| &s.id == sys_id) {
             let node_ids: Vec<String> = system.nodes.iter().map(|n| n.id.clone()).collect();
+            let component_ids: Vec<String> =
+                system.components.iter().map(|c| c.id.clone()).collect();
+            let valve_component_ids: Vec<String> = system
+                .components
+                .iter()
+                .filter(|c| matches!(c.kind, ComponentKind::Valve { .. }))
+                .map(|c| c.id.clone())
+                .collect();
 
             // First show selection details
             ui.separator();
@@ -111,8 +122,24 @@ impl InspectView {
                         actions.delete_component_id = Some(comp_id.clone());
                     }
                 }
+            } else if let Some(block_id) = selected_control_block_id {
+                if let Some(controls) = system.controls.as_mut() {
+                    if let Some(block) = controls.blocks.iter_mut().find(|b| &b.id == block_id) {
+                        actions.needs_recompile |= self.show_control_block_inspector(
+                            ui,
+                            block,
+                            &node_ids,
+                            &component_ids,
+                            &valve_component_ids,
+                        );
+                    } else {
+                        ui.label("Selected control block no longer exists");
+                    }
+                } else {
+                    ui.label("No control system in selected model");
+                }
             } else {
-                ui.label("No selection - click a node or component");
+                ui.label("No selection - click a node, component, or control block");
             }
 
             // Add node section
@@ -845,6 +872,600 @@ impl InspectView {
 
         changed
     }
+
+    fn show_control_block_inspector(
+        &mut self,
+        ui: &mut egui::Ui,
+        block: &mut ControlBlockDef,
+        node_ids: &[String],
+        component_ids: &[String],
+        valve_component_ids: &[String],
+    ) -> bool {
+        ui.strong("Control Block");
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            ui.label("ID:");
+            ui.label(&block.id);
+        });
+
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.label("Name:");
+            changed |= ui.text_edit_singleline(&mut block.name).changed();
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Type:");
+            ui.label(control_block_type_label(&block.kind));
+        });
+
+        ui.separator();
+        ui.strong("Parameters");
+
+        match &mut block.kind {
+            ControlBlockKindDef::Constant { value } => {
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Value:");
+                        ui.add(egui::DragValue::new(value).speed(0.01))
+                    })
+                    .inner
+                    .changed();
+            }
+            ControlBlockKindDef::MeasuredVariable { reference } => {
+                changed |= edit_measured_variable_reference(ui, reference, node_ids, component_ids);
+            }
+            ControlBlockKindDef::PIController {
+                kp,
+                ti_s,
+                out_min,
+                out_max,
+                integral_limit,
+                sample_period_s,
+            } => {
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Kp:");
+                        ui.add(egui::DragValue::new(kp).speed(0.01))
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Ti (s):");
+                        ui.add(egui::DragValue::new(ti_s).speed(0.01).range(1e-6..=1e6))
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Output Min:");
+                        ui.add(egui::DragValue::new(out_min).speed(0.01))
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Output Max:");
+                        ui.add(egui::DragValue::new(out_max).speed(0.01))
+                    })
+                    .inner
+                    .changed();
+
+                changed |=
+                    edit_optional_value(ui, "Integral Clamp", integral_limit, 0.01, 1e-6..=1e6);
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Sample Period (s):");
+                        ui.add(
+                            egui::DragValue::new(sample_period_s)
+                                .speed(0.001)
+                                .range(1e-6..=1e6),
+                        )
+                    })
+                    .inner
+                    .changed();
+            }
+            ControlBlockKindDef::PIDController {
+                kp,
+                ti_s,
+                td_s,
+                td_filter_s,
+                out_min,
+                out_max,
+                integral_limit,
+                sample_period_s,
+            } => {
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Kp:");
+                        ui.add(egui::DragValue::new(kp).speed(0.01))
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Ti (s):");
+                        ui.add(egui::DragValue::new(ti_s).speed(0.01).range(1e-6..=1e6))
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Td (s):");
+                        ui.add(egui::DragValue::new(td_s).speed(0.001).range(0.0..=1e6))
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Td Filter (s):");
+                        ui.add(
+                            egui::DragValue::new(td_filter_s)
+                                .speed(0.001)
+                                .range(1e-6..=1e6),
+                        )
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Output Min:");
+                        ui.add(egui::DragValue::new(out_min).speed(0.01))
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Output Max:");
+                        ui.add(egui::DragValue::new(out_max).speed(0.01))
+                    })
+                    .inner
+                    .changed();
+
+                changed |=
+                    edit_optional_value(ui, "Integral Clamp", integral_limit, 0.01, 1e-6..=1e6);
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Sample Period (s):");
+                        ui.add(
+                            egui::DragValue::new(sample_period_s)
+                                .speed(0.001)
+                                .range(1e-6..=1e6),
+                        )
+                    })
+                    .inner
+                    .changed();
+            }
+            ControlBlockKindDef::FirstOrderActuator {
+                tau_s,
+                rate_limit_per_s,
+                initial_position,
+            } => {
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Tau (s):");
+                        ui.add(egui::DragValue::new(tau_s).speed(0.01).range(1e-6..=1e6))
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Rate Limit (/s):");
+                        ui.add(
+                            egui::DragValue::new(rate_limit_per_s)
+                                .speed(0.01)
+                                .range(1e-6..=1e6),
+                        )
+                    })
+                    .inner
+                    .changed();
+
+                changed |= ui
+                    .horizontal(|ui| {
+                        ui.label("Initial Position:");
+                        ui.add(
+                            egui::DragValue::new(initial_position)
+                                .speed(0.01)
+                                .range(0.0..=1.0),
+                        )
+                    })
+                    .inner
+                    .changed();
+            }
+            ControlBlockKindDef::ActuatorCommand { component_id } => {
+                ui.horizontal(|ui| {
+                    ui.label("Target Valve:");
+                    if valve_component_ids.is_empty() {
+                        ui.label("No valve components available");
+                    } else {
+                        if !valve_component_ids.contains(component_id) {
+                            *component_id = valve_component_ids[0].clone();
+                            changed = true;
+                        }
+                        egui::ComboBox::from_id_salt(format!("ctrl_target_{}", block.id))
+                            .selected_text(component_id.clone())
+                            .show_ui(ui, |ui| {
+                                for id in valve_component_ids {
+                                    changed |=
+                                        ui.selectable_value(component_id, id.clone(), id).changed();
+                                }
+                            });
+                    }
+                });
+            }
+        }
+
+        let validation = validate_control_block_for_inspector(
+            &block.kind,
+            node_ids,
+            component_ids,
+            valve_component_ids,
+        );
+        if !validation.is_empty() {
+            ui.separator();
+            ui.colored_label(egui::Color32::LIGHT_RED, "Validation:");
+            for issue in validation {
+                ui.colored_label(egui::Color32::LIGHT_RED, format!("• {}", issue));
+            }
+        }
+
+        changed
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeasuredRefChoice {
+    NodePressure,
+    NodeTemperature,
+    EdgeMassFlow,
+    PressureDrop,
+}
+
+fn edit_measured_variable_reference(
+    ui: &mut egui::Ui,
+    reference: &mut MeasuredVariableDef,
+    node_ids: &[String],
+    component_ids: &[String],
+) -> bool {
+    let mut changed = false;
+
+    let mut choice = measured_ref_choice(reference);
+    let previous = choice;
+
+    ui.horizontal(|ui| {
+        ui.label("Measured:");
+        egui::ComboBox::from_id_salt("measured_ref_type")
+            .selected_text(measured_ref_label(choice))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut choice,
+                    MeasuredRefChoice::NodePressure,
+                    measured_ref_label(MeasuredRefChoice::NodePressure),
+                );
+                ui.selectable_value(
+                    &mut choice,
+                    MeasuredRefChoice::NodeTemperature,
+                    measured_ref_label(MeasuredRefChoice::NodeTemperature),
+                );
+                ui.selectable_value(
+                    &mut choice,
+                    MeasuredRefChoice::EdgeMassFlow,
+                    measured_ref_label(MeasuredRefChoice::EdgeMassFlow),
+                );
+                ui.selectable_value(
+                    &mut choice,
+                    MeasuredRefChoice::PressureDrop,
+                    measured_ref_label(MeasuredRefChoice::PressureDrop),
+                );
+            });
+    });
+
+    if choice != previous {
+        *reference = default_measured_reference(choice, node_ids, component_ids);
+        changed = true;
+    }
+
+    match reference {
+        MeasuredVariableDef::NodePressure { node_id }
+        | MeasuredVariableDef::NodeTemperature { node_id } => {
+            ui.horizontal(|ui| {
+                ui.label("Node:");
+                if node_ids.is_empty() {
+                    ui.label("No nodes available");
+                } else {
+                    if !node_ids.contains(node_id) {
+                        *node_id = node_ids[0].clone();
+                        changed = true;
+                    }
+                    egui::ComboBox::from_id_salt("measured_node")
+                        .selected_text(node_id.clone())
+                        .show_ui(ui, |ui| {
+                            for id in node_ids {
+                                changed |= ui.selectable_value(node_id, id.clone(), id).changed();
+                            }
+                        });
+                }
+            });
+        }
+        MeasuredVariableDef::EdgeMassFlow { component_id } => {
+            ui.horizontal(|ui| {
+                ui.label("Component:");
+                if component_ids.is_empty() {
+                    ui.label("No components available");
+                } else {
+                    if !component_ids.contains(component_id) {
+                        *component_id = component_ids[0].clone();
+                        changed = true;
+                    }
+                    egui::ComboBox::from_id_salt("measured_component")
+                        .selected_text(component_id.clone())
+                        .show_ui(ui, |ui| {
+                            for id in component_ids {
+                                changed |=
+                                    ui.selectable_value(component_id, id.clone(), id).changed();
+                            }
+                        });
+                }
+            });
+        }
+        MeasuredVariableDef::PressureDrop {
+            from_node_id,
+            to_node_id,
+        } => {
+            ui.horizontal(|ui| {
+                ui.label("From Node:");
+                if node_ids.is_empty() {
+                    ui.label("No nodes available");
+                } else {
+                    if !node_ids.contains(from_node_id) {
+                        *from_node_id = node_ids[0].clone();
+                        changed = true;
+                    }
+                    egui::ComboBox::from_id_salt("measured_pd_from")
+                        .selected_text(from_node_id.clone())
+                        .show_ui(ui, |ui| {
+                            for id in node_ids {
+                                changed |=
+                                    ui.selectable_value(from_node_id, id.clone(), id).changed();
+                            }
+                        });
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("To Node:");
+                if node_ids.is_empty() {
+                    ui.label("No nodes available");
+                } else {
+                    if !node_ids.contains(to_node_id) {
+                        *to_node_id = node_ids[0].clone();
+                        changed = true;
+                    }
+                    egui::ComboBox::from_id_salt("measured_pd_to")
+                        .selected_text(to_node_id.clone())
+                        .show_ui(ui, |ui| {
+                            for id in node_ids {
+                                changed |=
+                                    ui.selectable_value(to_node_id, id.clone(), id).changed();
+                            }
+                        });
+                }
+            });
+        }
+    }
+
+    changed
+}
+
+fn validate_control_block_for_inspector(
+    kind: &ControlBlockKindDef,
+    node_ids: &[String],
+    component_ids: &[String],
+    valve_component_ids: &[String],
+) -> Vec<String> {
+    let mut issues = Vec::new();
+
+    match kind {
+        ControlBlockKindDef::Constant { value } => {
+            if !value.is_finite() {
+                issues.push("Constant value must be finite".to_string());
+            }
+        }
+        ControlBlockKindDef::MeasuredVariable { reference } => match reference {
+            MeasuredVariableDef::NodePressure { node_id }
+            | MeasuredVariableDef::NodeTemperature { node_id } => {
+                if !node_ids.contains(node_id) {
+                    issues.push(format!("Referenced node '{}' does not exist", node_id));
+                }
+            }
+            MeasuredVariableDef::EdgeMassFlow { component_id } => {
+                if !component_ids.contains(component_id) {
+                    issues.push(format!(
+                        "Referenced component '{}' does not exist",
+                        component_id
+                    ));
+                }
+            }
+            MeasuredVariableDef::PressureDrop {
+                from_node_id,
+                to_node_id,
+            } => {
+                if !node_ids.contains(from_node_id) {
+                    issues.push(format!("From node '{}' does not exist", from_node_id));
+                }
+                if !node_ids.contains(to_node_id) {
+                    issues.push(format!("To node '{}' does not exist", to_node_id));
+                }
+            }
+        },
+        ControlBlockKindDef::PIController {
+            kp,
+            ti_s,
+            out_min,
+            out_max,
+            integral_limit,
+            sample_period_s,
+        } => {
+            if !kp.is_finite() {
+                issues.push("Kp must be finite".to_string());
+            }
+            if !ti_s.is_finite() || *ti_s <= 0.0 {
+                issues.push("Ti must be positive and finite".to_string());
+            }
+            if !sample_period_s.is_finite() || *sample_period_s <= 0.0 {
+                issues.push("Sample period must be positive and finite".to_string());
+            }
+            if !out_min.is_finite() || !out_max.is_finite() || *out_min >= *out_max {
+                issues.push("Output limits must satisfy out_min < out_max".to_string());
+            }
+            if let Some(limit) = integral_limit
+                && (!limit.is_finite() || *limit <= 0.0)
+            {
+                issues.push("Integral clamp must be positive and finite".to_string());
+            }
+        }
+        ControlBlockKindDef::PIDController {
+            kp,
+            ti_s,
+            td_s,
+            td_filter_s,
+            out_min,
+            out_max,
+            integral_limit,
+            sample_period_s,
+        } => {
+            if !kp.is_finite() {
+                issues.push("Kp must be finite".to_string());
+            }
+            if !ti_s.is_finite() || *ti_s <= 0.0 {
+                issues.push("Ti must be positive and finite".to_string());
+            }
+            if !td_s.is_finite() || *td_s < 0.0 {
+                issues.push("Td must be non-negative and finite".to_string());
+            }
+            if !td_filter_s.is_finite() || *td_filter_s <= 0.0 {
+                issues.push("Td filter must be positive and finite".to_string());
+            }
+            if !sample_period_s.is_finite() || *sample_period_s <= 0.0 {
+                issues.push("Sample period must be positive and finite".to_string());
+            }
+            if !out_min.is_finite() || !out_max.is_finite() || *out_min >= *out_max {
+                issues.push("Output limits must satisfy out_min < out_max".to_string());
+            }
+            if let Some(limit) = integral_limit
+                && (!limit.is_finite() || *limit <= 0.0)
+            {
+                issues.push("Integral clamp must be positive and finite".to_string());
+            }
+        }
+        ControlBlockKindDef::FirstOrderActuator {
+            tau_s,
+            rate_limit_per_s,
+            initial_position,
+        } => {
+            if !tau_s.is_finite() || *tau_s <= 0.0 {
+                issues.push("Tau must be positive and finite".to_string());
+            }
+            if !rate_limit_per_s.is_finite() || *rate_limit_per_s <= 0.0 {
+                issues.push("Rate limit must be positive and finite".to_string());
+            }
+            if !initial_position.is_finite() || !(0.0..=1.0).contains(initial_position) {
+                issues.push("Initial position must be in [0, 1]".to_string());
+            }
+        }
+        ControlBlockKindDef::ActuatorCommand { component_id } => {
+            if !component_ids.contains(component_id) {
+                issues.push(format!(
+                    "Target component '{}' does not exist",
+                    component_id
+                ));
+            } else if !valve_component_ids.contains(component_id) {
+                issues.push("Actuator command target must be a Valve component".to_string());
+            }
+        }
+    }
+
+    issues
+}
+
+fn control_block_type_label(kind: &ControlBlockKindDef) -> &'static str {
+    match kind {
+        ControlBlockKindDef::Constant { .. } => "Constant / Setpoint",
+        ControlBlockKindDef::MeasuredVariable { .. } => "Measured Variable",
+        ControlBlockKindDef::PIController { .. } => "PI Controller",
+        ControlBlockKindDef::PIDController { .. } => "PID Controller",
+        ControlBlockKindDef::FirstOrderActuator { .. } => "First-Order Actuator",
+        ControlBlockKindDef::ActuatorCommand { .. } => "Actuator Command",
+    }
+}
+
+fn measured_ref_choice(reference: &MeasuredVariableDef) -> MeasuredRefChoice {
+    match reference {
+        MeasuredVariableDef::NodePressure { .. } => MeasuredRefChoice::NodePressure,
+        MeasuredVariableDef::NodeTemperature { .. } => MeasuredRefChoice::NodeTemperature,
+        MeasuredVariableDef::EdgeMassFlow { .. } => MeasuredRefChoice::EdgeMassFlow,
+        MeasuredVariableDef::PressureDrop { .. } => MeasuredRefChoice::PressureDrop,
+    }
+}
+
+fn measured_ref_label(choice: MeasuredRefChoice) -> &'static str {
+    match choice {
+        MeasuredRefChoice::NodePressure => "Node Pressure",
+        MeasuredRefChoice::NodeTemperature => "Node Temperature",
+        MeasuredRefChoice::EdgeMassFlow => "Edge Mass Flow",
+        MeasuredRefChoice::PressureDrop => "Pressure Drop",
+    }
+}
+
+fn default_measured_reference(
+    choice: MeasuredRefChoice,
+    node_ids: &[String],
+    component_ids: &[String],
+) -> MeasuredVariableDef {
+    match choice {
+        MeasuredRefChoice::NodePressure => MeasuredVariableDef::NodePressure {
+            node_id: node_ids
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "n1".to_string()),
+        },
+        MeasuredRefChoice::NodeTemperature => MeasuredVariableDef::NodeTemperature {
+            node_id: node_ids
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "n1".to_string()),
+        },
+        MeasuredRefChoice::EdgeMassFlow => MeasuredVariableDef::EdgeMassFlow {
+            component_id: component_ids
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "c1".to_string()),
+        },
+        MeasuredRefChoice::PressureDrop => MeasuredVariableDef::PressureDrop {
+            from_node_id: node_ids
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "n1".to_string()),
+            to_node_id: node_ids.get(1).cloned().unwrap_or_else(|| {
+                node_ids
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "n1".to_string())
+            }),
+        },
+    }
 }
 
 impl NodeKindChoice {
@@ -895,4 +1516,77 @@ fn edit_optional_value(
         }
     })
     .inner
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ids(items: &[&str]) -> Vec<String> {
+        items.iter().map(|v| (*v).to_string()).collect()
+    }
+
+    #[test]
+    fn validate_pi_controller_limits_and_period() {
+        let kind = ControlBlockKindDef::PIController {
+            kp: 1.0,
+            ti_s: 0.0,
+            out_min: 1.0,
+            out_max: 1.0,
+            integral_limit: Some(-1.0),
+            sample_period_s: -0.01,
+        };
+
+        let issues = validate_control_block_for_inspector(&kind, &ids(&["n1"]), &[], &[]);
+        assert!(issues.iter().any(|m| m.contains("Ti")));
+        assert!(issues.iter().any(|m| m.contains("Sample period")));
+        assert!(issues.iter().any(|m| m.contains("Output limits")));
+        assert!(issues.iter().any(|m| m.contains("Integral clamp")));
+    }
+
+    #[test]
+    fn validate_measured_reference_missing_nodes() {
+        let kind = ControlBlockKindDef::MeasuredVariable {
+            reference: MeasuredVariableDef::PressureDrop {
+                from_node_id: "n_missing_a".to_string(),
+                to_node_id: "n_missing_b".to_string(),
+            },
+        };
+
+        let issues = validate_control_block_for_inspector(&kind, &ids(&["n1"]), &[], &[]);
+        assert_eq!(issues.len(), 2);
+    }
+
+    #[test]
+    fn validate_actuator_command_requires_valve_target() {
+        let kind = ControlBlockKindDef::ActuatorCommand {
+            component_id: "c_pump".to_string(),
+        };
+        let component_ids = ids(&["c_pump", "c_valve"]);
+        let valve_ids = ids(&["c_valve"]);
+
+        let issues = validate_control_block_for_inspector(&kind, &[], &component_ids, &valve_ids);
+        assert!(
+            issues
+                .iter()
+                .any(|m| m.contains("must be a Valve component"))
+        );
+    }
+
+    #[test]
+    fn validate_pid_controller_valid_values_pass() {
+        let kind = ControlBlockKindDef::PIDController {
+            kp: 1.2,
+            ti_s: 5.0,
+            td_s: 0.5,
+            td_filter_s: 0.05,
+            out_min: 0.0,
+            out_max: 1.0,
+            integral_limit: Some(2.0),
+            sample_period_s: 0.1,
+        };
+
+        let issues = validate_control_block_for_inspector(&kind, &ids(&["n1"]), &[], &[]);
+        assert!(issues.is_empty());
+    }
 }

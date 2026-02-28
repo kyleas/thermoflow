@@ -7,8 +7,9 @@ use tf_project::schema::{
 use tf_results::{RunStore, TimeseriesRecord};
 
 use crate::pid_editor::{
-    GRID_SPACING, PidEditorState, PidLayout, autoroute, draw_component_symbol,
-    draw_control_block_symbol, draw_node_symbol, is_orthogonal, normalize_orthogonal, snap_to_grid,
+    BoxSelection, Clipboard, GRID_SPACING, PidEditorState, PidLayout, autoroute, copy_selection,
+    delete_selection, draw_component_symbol, draw_control_block_symbol, draw_node_symbol,
+    is_orthogonal, normalize_orthogonal, paste_clipboard, snap_to_grid,
 };
 use crate::views::{ComponentKindChoice, ControlBlockKindChoice};
 
@@ -35,6 +36,8 @@ pub struct PidView {
     show_steady: bool,
     is_playing: bool,
     play_speed: f64,
+    clipboard: Clipboard,
+    paste_sequence: usize,
 }
 
 impl Default for PidView {
@@ -61,6 +64,8 @@ impl Default for PidView {
             show_steady: false,
             is_playing: false,
             play_speed: 1.0,
+            clipboard: Clipboard::default(),
+            paste_sequence: 0,
         }
     }
 }
@@ -88,14 +93,103 @@ impl PidView {
         self.node_overlays.insert(node_id, overlay);
     }
 
+    pub fn selected_control_block_id(&self) -> Option<String> {
+        if self.editor.selection.control_blocks.len() == 1
+            && self.editor.selection.nodes.is_empty()
+            && self.editor.selection.components.is_empty()
+        {
+            return self.editor.selection.control_blocks.iter().next().cloned();
+        }
+        None
+    }
+
+    pub fn selected_node(&self) -> Option<String> {
+        if self.editor.selection.nodes.len() == 1
+            && self.editor.selection.components.is_empty()
+            && self.editor.selection.control_blocks.is_empty()
+        {
+            return self.editor.selection.nodes.iter().next().cloned();
+        }
+        None
+    }
+
+    pub fn selected_component(&self) -> Option<String> {
+        if self.editor.selection.components.len() == 1
+            && self.editor.selection.nodes.is_empty()
+            && self.editor.selection.control_blocks.is_empty()
+        {
+            return self.editor.selection.components.iter().next().cloned();
+        }
+        None
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.editor.selection.clear();
+        self.selected_control_block_id = None;
+        self.selected_signal_connection_index = None;
+    }
+
+    fn save_selection_to_clipboard(&mut self, project: &Project, system_id: &str) {
+        self.clipboard = copy_selection(project, system_id, &self.layout, &self.editor.selection);
+        self.paste_sequence = 0;
+    }
+
+    fn paste_from_clipboard(&mut self, project: &mut Project, system_id: &str) -> bool {
+        if self.clipboard.is_empty() {
+            return false;
+        }
+
+        self.save_layout(project, system_id);
+
+        self.paste_sequence = self.paste_sequence.saturating_add(1);
+        let step = self.paste_sequence as f32;
+        let offset = egui::vec2(36.0 * step, 28.0 * step);
+
+        let new_selection = paste_clipboard(project, system_id, &self.clipboard, offset);
+        if new_selection.is_empty() {
+            return false;
+        }
+
+        self.load_layout(project, system_id);
+        self.editor.selection = new_selection;
+        self.selected_control_block_id = self.selected_control_block_id();
+        self.selected_signal_connection_index = None;
+        true
+    }
+
+    fn duplicate_selection(&mut self, project: &mut Project, system_id: &str) -> bool {
+        if self.editor.selection.is_empty() {
+            return false;
+        }
+
+        self.save_selection_to_clipboard(project, system_id);
+        self.paste_from_clipboard(project, system_id)
+    }
+
+    fn delete_selected_items(&mut self, project: &mut Project, system_id: &str) -> bool {
+        if self.editor.selection.is_empty() {
+            return false;
+        }
+
+        self.save_layout(project, system_id);
+        let _ = delete_selection(project, system_id, &self.editor.selection);
+        self.load_layout(project, system_id);
+        self.clear_selection();
+        true
+    }
+
+    pub fn clear_control_selection(&mut self) {
+        self.editor.selection.control_blocks.clear();
+        self.selected_control_block_id = None;
+        self.selected_signal_connection_index = None;
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
         project: &mut Option<Project>,
         selected_system_id: &Option<String>,
-        selected_node_id: &mut Option<String>,
-        selected_component_id: &mut Option<String>,
         selected_run_id: &Option<String>,
         run_store: &Option<RunStore>,
         overlay: &OverlaySettingsDef,
@@ -108,6 +202,28 @@ impl PidView {
 
             // Check if we need to save layout (flag set when dragging stops)
             let mut should_save_layout = false;
+
+            let shortcuts = ui.input(|input| {
+                (
+                    input.modifiers.command && input.key_pressed(egui::Key::C),
+                    input.modifiers.command && input.key_pressed(egui::Key::V),
+                    input.modifiers.command && input.key_pressed(egui::Key::D),
+                    input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace),
+                )
+            });
+
+            if shortcuts.0 {
+                self.save_selection_to_clipboard(proj, sys_id);
+            }
+            if shortcuts.1 && self.paste_from_clipboard(proj, sys_id) {
+                should_save_layout = true;
+            }
+            if shortcuts.2 && self.duplicate_selection(proj, sys_id) {
+                should_save_layout = true;
+            }
+            if shortcuts.3 && self.delete_selected_items(proj, sys_id) {
+                should_save_layout = true;
+            }
 
             let system = proj.systems.iter_mut().find(|s| &s.id == sys_id);
             if let Some(system) = system {
@@ -234,21 +350,20 @@ impl PidView {
                     if ui.button("Pick endpoints").clicked() {
                         self.pending_component_kind = Some(self.add_component_kind);
                         self.pending_from_node = None;
-                        *selected_component_id = None;
-                        *selected_node_id = None;
+                        self.editor.selection.clear();
                     }
                     if let Some(kind) = self.pending_component_kind {
                         ui.label(format!("Pick 2 nodes ({})", component_kind_label(kind)));
                     }
-                    if let Some(comp_id) = selected_component_id.clone() {
+                    if let Some(comp_id) = self.selected_component() {
                         if ui.button("Insert component").clicked() {
                             if let Some(new_id) = self.insert_component_on_edge(
                                 system,
                                 &comp_id,
                                 self.add_component_kind,
                             ) {
-                                *selected_component_id = Some(new_id);
-                                *selected_node_id = None;
+                                self.editor.selection.clear();
+                                self.editor.selection.add_component(new_id);
                                 should_save_layout = true;
                             }
                         }
@@ -279,8 +394,7 @@ impl PidView {
                         });
                     if ui.button("Place block").clicked() {
                         self.pending_control_block_kind = Some(self.add_control_block_kind);
-                        *selected_component_id = None;
-                        *selected_node_id = None;
+                        self.editor.selection.clear();
                     }
                     if let Some(kind) = self.pending_control_block_kind {
                         ui.label(format!(
@@ -298,8 +412,7 @@ impl PidView {
                         self.pending_signal_to_input = None;
                         // We'll use a flag to indicate wiring mode
                         // For now, just start with no pending blocks
-                        *selected_component_id = None;
-                        *selected_node_id = None;
+                        self.editor.selection.clear();
                     }
                     if self.pending_signal_from_block.is_some() {
                         if let Some(from_id) = &self.pending_signal_from_block {
@@ -322,9 +435,10 @@ impl PidView {
                 // Deletion toolbar
                 ui.horizontal(|ui| {
                     ui.separator();
-                    if let Some(block_id) = self.selected_control_block_id.clone() {
+                    if let Some(block_id) = self.selected_control_block_id() {
                         if ui.button(format!("Delete Block '{}'", block_id)).clicked() {
                             self.delete_control_block(system, &block_id);
+                            self.editor.selection.remove_control_block(&block_id);
                             self.selected_control_block_id = None;
                             should_save_layout = true;
                         }
@@ -338,7 +452,7 @@ impl PidView {
                     }
                 });
 
-                if let Some(node_id) = selected_node_id.clone() {
+                if let Some(node_id) = self.selected_node() {
                     if let Some(node_layout) = self.layout.nodes.get_mut(&node_id) {
                         let mut changed = false;
                         ui.horizontal(|ui| {
@@ -361,7 +475,7 @@ impl PidView {
                         }
                     }
                 }
-                if let Some(comp_id) = selected_component_id.clone() {
+                if let Some(comp_id) = self.selected_component() {
                     if let Some(edge_layout) = self.layout.edges.get_mut(&comp_id) {
                         let mut changed = false;
                         ui.horizontal(|ui| {
@@ -397,12 +511,39 @@ impl PidView {
 
                 let pointer = response.interact_pointer_pos();
 
+                if let Some(ref box_sel) = self.editor.box_selection {
+                    let selection_rect = box_sel.rect();
+                    painter.rect_filled(
+                        selection_rect,
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(120, 180, 255, 30),
+                    );
+                    painter.rect_stroke(
+                        selection_rect,
+                        0.0,
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 180, 255)),
+                    );
+                }
+
                 if response.drag_started() {
                     if let Some(pos) = pointer {
+                        let shift_pressed = ui.input(|input| input.modifiers.shift);
                         // Try to hit test components first (they're smaller and should take priority)
                         if let Some(comp_id) = self.hit_test_component(system, pos) {
-                            let free_move = ui.input(|input| input.modifiers.shift);
-                            if let Some(route) = self.layout.edges.get(&comp_id) {
+                            let already_selected =
+                                self.editor.selection.contains_component(&comp_id);
+                            if already_selected && !shift_pressed {
+                                self.editor.drag_state = Some(crate::pid_editor::DragState {
+                                    target: crate::pid_editor::DragTarget::MultiSelection,
+                                    start_pos: pos,
+                                    drag_offset: egui::Vec2::ZERO,
+                                    free_move: false,
+                                });
+                            } else if let Some(route) = self.layout.edges.get(&comp_id) {
+                                if !shift_pressed {
+                                    self.editor.selection.clear();
+                                    self.editor.selection.add_component(comp_id.clone());
+                                }
                                 let component_pos = route
                                     .component_pos
                                     .unwrap_or_else(|| polyline_midpoint(&route.points));
@@ -412,11 +553,49 @@ impl PidView {
                                     },
                                     start_pos: component_pos,
                                     drag_offset: component_pos - pos,
-                                    free_move,
+                                    free_move: false,
+                                });
+                            }
+                        } else if let Some(block_id) = self.hit_test_control_block(system, pos) {
+                            let already_selected =
+                                self.editor.selection.contains_control_block(&block_id);
+                            if already_selected && !shift_pressed {
+                                self.editor.drag_state = Some(crate::pid_editor::DragState {
+                                    target: crate::pid_editor::DragTarget::MultiSelection,
+                                    start_pos: pos,
+                                    drag_offset: egui::Vec2::ZERO,
+                                    free_move: false,
+                                });
+                            } else if let Some(block_layout) =
+                                self.layout.control_blocks.get(&block_id)
+                            {
+                                if !shift_pressed {
+                                    self.editor.selection.clear();
+                                    self.editor.selection.add_control_block(block_id.clone());
+                                }
+                                self.editor.drag_state = Some(crate::pid_editor::DragState {
+                                    target: crate::pid_editor::DragTarget::ControlBlock {
+                                        block_id: block_id.clone(),
+                                    },
+                                    start_pos: block_layout.pos,
+                                    drag_offset: block_layout.pos - pos,
+                                    free_move: false,
                                 });
                             }
                         } else if let Some(node_id) = self.hit_test_node(system, pos) {
-                            if let Some(node_layout) = self.layout.nodes.get(&node_id) {
+                            let already_selected = self.editor.selection.contains_node(&node_id);
+                            if already_selected && !shift_pressed {
+                                self.editor.drag_state = Some(crate::pid_editor::DragState {
+                                    target: crate::pid_editor::DragTarget::MultiSelection,
+                                    start_pos: pos,
+                                    drag_offset: egui::Vec2::ZERO,
+                                    free_move: false,
+                                });
+                            } else if let Some(node_layout) = self.layout.nodes.get(&node_id) {
+                                if !shift_pressed {
+                                    self.editor.selection.clear();
+                                    self.editor.selection.add_node(node_id.clone());
+                                }
                                 self.editor.drag_state = Some(crate::pid_editor::DragState {
                                     target: crate::pid_editor::DragTarget::Node {
                                         node_id: node_id.clone(),
@@ -425,6 +604,14 @@ impl PidView {
                                     drag_offset: node_layout.pos - pos,
                                     free_move: false,
                                 });
+                            }
+                        } else {
+                            self.editor.box_selection = Some(BoxSelection {
+                                start_pos: pos,
+                                current_pos: pos,
+                            });
+                            if !shift_pressed {
+                                self.editor.selection.clear();
                             }
                         }
                     }
@@ -443,11 +630,8 @@ impl PidView {
                                 self.update_routes_for_node(system, node_id);
                             }
                             crate::pid_editor::DragTarget::Component { component_id } => {
-                                let next_pos = if drag_state.free_move {
-                                    pos + drag_state.drag_offset
-                                } else {
-                                    self.constrain_to_rect(pos + drag_state.drag_offset, rect)
-                                };
+                                let next_pos =
+                                    self.constrain_to_rect(pos + drag_state.drag_offset, rect);
                                 if let Some(route) = self.layout.edges.get_mut(component_id) {
                                     route.component_pos = Some(next_pos);
                                 }
@@ -460,7 +644,99 @@ impl PidView {
                                     block.pos = clamped;
                                 }
                             }
+                            crate::pid_editor::DragTarget::MultiSelection => {
+                                let delta = pos - drag_state.start_pos;
+                                if delta != egui::Vec2::ZERO {
+                                    let selected_nodes: Vec<String> =
+                                        self.editor.selection.nodes.iter().cloned().collect();
+                                    let selected_components: Vec<String> =
+                                        self.editor.selection.components.iter().cloned().collect();
+                                    let selected_blocks: Vec<String> = self
+                                        .editor
+                                        .selection
+                                        .control_blocks
+                                        .iter()
+                                        .cloned()
+                                        .collect();
+
+                                    for node_id in &selected_nodes {
+                                        if let Some(node_layout) =
+                                            self.layout.nodes.get_mut(node_id)
+                                        {
+                                            let next = node_layout.pos + delta;
+                                            let padding = 20.0;
+                                            node_layout.pos = Pos2::new(
+                                                next.x.clamp(
+                                                    rect.left() + padding,
+                                                    rect.right() - padding,
+                                                ),
+                                                next.y.clamp(
+                                                    rect.top() + padding,
+                                                    rect.bottom() - padding,
+                                                ),
+                                            );
+                                        }
+                                    }
+                                    for component_id in &selected_components {
+                                        if let Some(route) = self.layout.edges.get_mut(component_id)
+                                        {
+                                            let current =
+                                                route.component_pos.unwrap_or_else(|| {
+                                                    polyline_midpoint(&route.points)
+                                                });
+                                            let next = current + delta;
+                                            let padding = 20.0;
+                                            route.component_pos = Some(Pos2::new(
+                                                next.x.clamp(
+                                                    rect.left() + padding,
+                                                    rect.right() - padding,
+                                                ),
+                                                next.y.clamp(
+                                                    rect.top() + padding,
+                                                    rect.bottom() - padding,
+                                                ),
+                                            ));
+                                        }
+                                    }
+                                    for block_id in &selected_blocks {
+                                        if let Some(block) =
+                                            self.layout.control_blocks.get_mut(block_id)
+                                        {
+                                            let next = block.pos + delta;
+                                            let padding = 20.0;
+                                            block.pos = Pos2::new(
+                                                next.x.clamp(
+                                                    rect.left() + padding,
+                                                    rect.right() - padding,
+                                                ),
+                                                next.y.clamp(
+                                                    rect.top() + padding,
+                                                    rect.bottom() - padding,
+                                                ),
+                                            );
+                                        }
+                                    }
+
+                                    for node_id in &selected_nodes {
+                                        self.update_routes_for_node(system, node_id);
+                                    }
+                                    for component_id in &selected_components {
+                                        self.update_routes_for_component(system, component_id);
+                                    }
+
+                                    if let Some(active_drag_state) = self.editor.drag_state.as_mut()
+                                    {
+                                        active_drag_state.start_pos = pos;
+                                    }
+                                }
+                            }
                         }
+                    }
+
+                    if let (Some(pos), Some(box_sel)) =
+                        (pointer, self.editor.box_selection.as_mut())
+                    {
+                        box_sel.current_pos = pos;
                     }
                 }
 
@@ -477,7 +753,7 @@ impl PidView {
                             }
                             crate::pid_editor::DragTarget::Component { component_id } => {
                                 if let Some(route) = self.layout.edges.get_mut(component_id) {
-                                    if self.grid_enabled && !drag_state.free_move {
+                                    if self.grid_enabled {
                                         if let Some(pos) = route.component_pos {
                                             route.component_pos = Some(snap_to_grid(pos));
                                         }
@@ -492,13 +768,96 @@ impl PidView {
                                     }
                                 }
                             }
+                            crate::pid_editor::DragTarget::MultiSelection => {
+                                let selected_nodes: Vec<String> =
+                                    self.editor.selection.nodes.iter().cloned().collect();
+                                let selected_components: Vec<String> =
+                                    self.editor.selection.components.iter().cloned().collect();
+                                let selected_blocks: Vec<String> = self
+                                    .editor
+                                    .selection
+                                    .control_blocks
+                                    .iter()
+                                    .cloned()
+                                    .collect();
+
+                                if self.grid_enabled {
+                                    for node_id in &selected_nodes {
+                                        if let Some(node_layout) =
+                                            self.layout.nodes.get_mut(node_id)
+                                        {
+                                            node_layout.pos = snap_to_grid(node_layout.pos);
+                                        }
+                                    }
+                                    for component_id in &selected_components {
+                                        if let Some(route) = self.layout.edges.get_mut(component_id)
+                                        {
+                                            if let Some(pos) = route.component_pos {
+                                                route.component_pos = Some(snap_to_grid(pos));
+                                            }
+                                        }
+                                    }
+                                    for block_id in &selected_blocks {
+                                        if let Some(block) =
+                                            self.layout.control_blocks.get_mut(block_id)
+                                        {
+                                            block.pos = snap_to_grid(block.pos);
+                                        }
+                                    }
+                                }
+
+                                for node_id in &selected_nodes {
+                                    self.update_routes_for_node(system, node_id);
+                                }
+                                for component_id in &selected_components {
+                                    self.update_routes_for_component(system, component_id);
+                                }
+                            }
                         }
                         should_save_layout = true;
                     }
+
+                    if let Some(box_sel) = self.editor.box_selection.take() {
+                        let selection_rect = box_sel.rect();
+
+                        for node in &system.nodes {
+                            if let Some(node_layout) = self.layout.nodes.get(&node.id) {
+                                if selection_rect.contains(node_layout.pos) {
+                                    self.editor.selection.add_node(node.id.clone());
+                                }
+                            }
+                        }
+
+                        for component in &system.components {
+                            if let Some(route) = self.layout.edges.get(&component.id) {
+                                let component_pos = route
+                                    .component_pos
+                                    .unwrap_or_else(|| polyline_midpoint(&route.points));
+                                if selection_rect.contains(component_pos) {
+                                    self.editor.selection.add_component(component.id.clone());
+                                }
+                            }
+                        }
+
+                        if let Some(ref controls) = system.controls {
+                            for block in &controls.blocks {
+                                if let Some(block_layout) =
+                                    self.layout.control_blocks.get(&block.id)
+                                {
+                                    if selection_rect.contains(block_layout.pos) {
+                                        self.editor.selection.add_control_block(block.id.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    self.selected_control_block_id = self.selected_control_block_id();
                 }
 
                 if response.clicked() {
                     if let Some(click_pos) = pointer {
+                        let shift_pressed = ui.input(|input| input.modifiers.shift);
                         // Check if we're placing a control block
                         if let Some(kind) = self.pending_control_block_kind {
                             // Place control block at click position
@@ -507,12 +866,12 @@ impl PidView {
                             } else {
                                 click_pos
                             };
-                            let _new_block_id = self.add_control_block(system, kind, snapped_pos);
+                            let new_block_id = self.add_control_block(system, kind, snapped_pos);
                             self.pending_control_block_kind = None;
-                            // Note: we don't have selected_control_block_id in the signature yet
-                            // so we'll skip selection for now
-                            *selected_component_id = None;
-                            *selected_node_id = None;
+                            if !shift_pressed {
+                                self.editor.selection.clear();
+                            }
+                            self.editor.selection.add_control_block(new_block_id);
                             should_save_layout = true;
                         } else if let Some(block_id) =
                             self.hit_test_control_block(system, click_pos)
@@ -537,22 +896,36 @@ impl PidView {
                                 self.pending_signal_to_input = None;
                                 self.selected_control_block_id = None;
                                 self.selected_signal_connection_index = None;
-                            } else if self.pending_signal_from_block.is_none() {
-                                // Not in wiring mode - check if we should start wiring or just select
-                                // For now, just select the block
-                                self.selected_control_block_id = Some(block_id);
-                                self.selected_signal_connection_index = None;
                             } else {
-                                // Start wiring from this block (if it has an output)
-                                if block_has_output(system, &block_id) {
-                                    self.pending_signal_from_block = Some(block_id);
-                                    self.pending_signal_to_input = None;
-                                    self.selected_control_block_id = None;
-                                    self.selected_signal_connection_index = None;
+                                if shift_pressed {
+                                    self.editor.selection.toggle_control_block(block_id.clone());
+                                } else {
+                                    self.editor.selection.clear();
+                                    self.editor.selection.add_control_block(block_id.clone());
                                 }
+                                self.selected_control_block_id = self.selected_control_block_id();
+                                self.selected_signal_connection_index = None;
                             }
-                            *selected_component_id = None;
-                            *selected_node_id = None;
+                        } else if let Some(signal_idx) = self.hit_test_signal_connection(click_pos)
+                        {
+                            if shift_pressed {
+                                self.editor.selection.toggle_signal(signal_idx);
+                            } else {
+                                self.editor.selection.clear();
+                                self.editor.selection.add_signal(signal_idx);
+                            }
+
+                            self.selected_signal_connection_index =
+                                if self.editor.selection.signal_connections.len() == 1 {
+                                    self.editor
+                                        .selection
+                                        .signal_connections
+                                        .iter()
+                                        .next()
+                                        .copied()
+                                } else {
+                                    None
+                                };
                         } else if let Some(node_id) = self.hit_test_node(system, click_pos) {
                             if let Some(kind) = self.pending_component_kind {
                                 if let Some(from_id) = self.pending_from_node.clone() {
@@ -562,29 +935,41 @@ impl PidView {
                                         );
                                         self.pending_component_kind = None;
                                         self.pending_from_node = None;
-                                        *selected_component_id = new_id;
-                                        *selected_node_id = None;
+                                        self.editor.selection.clear();
+                                        if let Some(new_component_id) = new_id {
+                                            self.editor.selection.add_component(new_component_id);
+                                        }
                                         should_save_layout = true;
                                     }
                                 } else {
                                     self.pending_from_node = Some(node_id.clone());
                                 }
                             } else {
-                                *selected_node_id = Some(node_id);
-                                *selected_component_id = None;
+                                if shift_pressed {
+                                    self.editor.selection.toggle_node(node_id);
+                                } else {
+                                    self.editor.selection.clear();
+                                    self.editor.selection.add_node(node_id);
+                                }
                             }
                         } else if let Some(comp_id) = self.hit_test_edge(system, click_pos) {
-                            *selected_component_id = Some(comp_id);
-                            *selected_node_id = None;
+                            if shift_pressed {
+                                self.editor.selection.toggle_component(comp_id);
+                            } else {
+                                self.editor.selection.clear();
+                                self.editor.selection.add_component(comp_id);
+                            }
                         } else {
-                            *selected_component_id = None;
-                            *selected_node_id = None;
+                            self.editor.selection.clear();
+                            self.selected_signal_connection_index = None;
                         }
+
+                        self.selected_control_block_id = self.selected_control_block_id();
                     }
                 }
 
                 for component in &system.components {
-                    let selected = selected_component_id.as_ref() == Some(&component.id);
+                    let selected = self.editor.selection.contains_component(&component.id);
                     let color = if selected {
                         egui::Color32::YELLOW
                     } else {
@@ -639,7 +1024,7 @@ impl PidView {
                 let node_radius = 18.0;
                 for node in &system.nodes {
                     if let Some(node_layout) = self.layout.nodes.get(&node.id) {
-                        let selected = selected_node_id.as_ref() == Some(&node.id);
+                        let selected = self.editor.selection.contains_node(&node.id);
                         let color = if selected {
                             egui::Color32::YELLOW
                         } else {
@@ -736,10 +1121,17 @@ impl PidView {
                 // Render control blocks if controls exist
                 if let Some(ref controls) = system.controls {
                     // First render signal connections (so they appear behind blocks)
-                    for signal_conn in &self.layout.signal_connections {
+                    for (signal_idx, signal_conn) in
+                        self.layout.signal_connections.iter().enumerate()
+                    {
                         if signal_conn.points.len() >= 2 {
                             // Draw dashed line for signal connections
-                            let signal_color = egui::Color32::from_rgb(100, 255, 100); // Green for signals
+                            let signal_color = if self.editor.selection.contains_signal(signal_idx)
+                            {
+                                egui::Color32::YELLOW
+                            } else {
+                                egui::Color32::from_rgb(100, 255, 100)
+                            }; // Green for signals
 
                             for i in 0..signal_conn.points.len() - 1 {
                                 let from = signal_conn.points[i];
@@ -798,8 +1190,7 @@ impl PidView {
                     // Then render blocks on top
                     for block in &controls.blocks {
                         if let Some(block_layout) = self.layout.control_blocks.get(&block.id) {
-                            let selected =
-                                self.selected_control_block_id.as_ref() == Some(&block.id);
+                            let selected = self.editor.selection.contains_control_block(&block.id);
                             let color = if selected {
                                 egui::Color32::YELLOW
                             } else {
@@ -1096,6 +1487,15 @@ impl PidView {
                 if rect.contains(point) {
                     return Some(component.id.clone());
                 }
+            }
+        }
+        None
+    }
+
+    fn hit_test_signal_connection(&self, point: Pos2) -> Option<usize> {
+        for (idx, signal_conn) in self.layout.signal_connections.iter().enumerate() {
+            if distance_to_polyline(point, &signal_conn.points) < 8.0 {
+                return Some(idx);
             }
         }
         None
@@ -1583,16 +1983,6 @@ where
     }
     format!("{}{}", prefix, max + 1)
 }
-fn block_has_output(system: &tf_project::schema::SystemDef, block_id: &str) -> bool {
-    if let Some(ref controls) = system.controls {
-        if let Some(block) = controls.blocks.iter().find(|b| b.id == block_id) {
-            // All blocks except ActuatorCommand have outputs
-            return !matches!(block.kind, ControlBlockKindDef::ActuatorCommand { .. });
-        }
-    }
-    false
-}
-
 fn get_default_input_for_block(
     system: &tf_project::schema::SystemDef,
     block_id: &str,

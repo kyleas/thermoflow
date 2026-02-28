@@ -17,10 +17,17 @@ fn clear_run_cache(project_path: &Path) {
 
 fn prepare_test_project() -> PathBuf {
     let source = Path::new("../../examples/projects/01_orifice_steady.yaml");
-    let temp_dir =
-        std::env::temp_dir().join(format!("tf_app_integration_steady_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&temp_dir);
     let sequence = TEST_PROJECT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp_dir = std::env::temp_dir().join(format!(
+        "tf_app_integration_steady_{}_{}_{}",
+        std::process::id(),
+        sequence,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let _ = std::fs::create_dir_all(&temp_dir);
     let dest = temp_dir.join(format!(
         "01_orifice_steady_{}_{}.yaml",
         sequence,

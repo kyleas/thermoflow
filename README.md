@@ -7,7 +7,7 @@ Thermoflow combines:
 - **System Simulation**: Steady-state and transient modeling of fluid networks (pumps, turbines, pipes, orifices, valves)
 - **Fluid Properties**: RefProp-compatible thermodynamic and transport property calculations
 - **Cycle Analysis**: Engine design, turbopump matching, and parametric studies
-- **Interactive Plotting**: Time-series visualization, result comparison, parameter sweeps
+- **Interactive Plotting**: Time-series visualization for nodes, components, and control blocks; result comparison and parameter sweeps
 
 ## Quick Start
 
@@ -141,7 +141,8 @@ Compare results across multiple runs. Create parameter sweeps, sensitivity matri
 - Steady-state fluid network simulation
 - Transient simulation for fixed-topology systems (single-CV and supported multi-CV benchmarks)
 - Closed-loop transient controls (measured variable, sampled PI/PID, actuator-driven valve)
-- P&ID editor (node/component creation, control block placement, signal wiring)
+- P&ID editor (node/component creation, control block placement, signal wiring, control parameter tuning)
+- Control history plotting (visualize control block outputs, setpoints, and actuator positions over time)
 - Project file format (YAML)
 - Run caching and time-series storage
 - CLI with full command set

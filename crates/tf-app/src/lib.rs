@@ -5,6 +5,7 @@
 //! simulation execution, and result querying.
 
 pub mod error;
+pub mod metrics;
 pub mod progress;
 pub mod project_service;
 pub mod query;
@@ -15,13 +16,15 @@ pub mod transient_fallback_policy;
 
 // Re-export key types for convenience
 pub use error::{AppError, AppResult};
+pub use metrics::LoopMetrics;
 pub use progress::{RunProgressEvent, RunStage, SteadyProgress, TransientProgress};
 pub use project_service::{
     get_system, list_systems, load_project, save_project, validate_project, SystemSummary,
 };
 pub use query::{
-    extract_component_series, extract_node_series, get_run_summary, list_component_ids,
-    list_node_ids, RunSummary,
+    analyze_control_loops, extract_component_series, extract_control_series, extract_node_series,
+    get_run_summary, list_component_ids, list_control_ids, list_node_ids, ControlLoopAnalysis,
+    RunSummary,
 };
 pub use run_service::{
     ensure_run, ensure_run_with_progress, list_runs, load_run, RunMode, RunOptions, RunRequest,

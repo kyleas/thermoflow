@@ -1,4 +1,4 @@
-use tf_app::analyze_control_loops;
+use tf_app::{analyze_control_loops, ControlLoopAnalysis};
 use tf_results::RunStore;
 
 #[derive(Default)]
@@ -129,7 +129,7 @@ impl RunView {
         ui.strong("Control Loop Metrics");
 
         // Analyze control loops
-        let loops = analyze_control_loops(records).unwrap_or_default();
+        let loops = tf_app::analyze_control_loops(records).unwrap_or_default();
 
         if loops.is_empty() {
             ui.label("No control loops detected in this run");
@@ -171,7 +171,7 @@ impl RunView {
                             if let Some(max_out) = loop_analysis.metrics.max_controller_output {
                                 ui.label(format!("Max controller out: {:.3}", max_out));
                             }
-                            if let Some(max_act) = loop_analysis.metrics.max_actuator_position {
+                            if let Some(max_act) = loop_analysis.metrics.max_actuator_pos {
                                 ui.label(format!("Max actuator pos: {:.3}", max_act));
                             }
                         });
@@ -180,4 +180,3 @@ impl RunView {
             }
         }
     }
-}
