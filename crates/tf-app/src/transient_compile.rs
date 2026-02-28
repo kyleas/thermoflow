@@ -103,12 +103,20 @@ struct RhsTimingBreakdown {
     rhs_assembly_time_s: f64,
     rhs_surrogate_time_s: f64,
     rk4_bookkeeping_time_s: f64,
+    // Phase 8 instrumentation: separate CV boundary work
+    rhs_direct_cv_pressure_inversion_time_s: f64,
+    rhs_direct_cv_validation_time_s: f64,
+    rhs_direct_cv_fallback_time_s: f64,
     execution_plan_checks: usize,
     execution_plan_unchanged: usize,
     component_rebuilds: usize,
     component_reuses: usize,
     snapshot_setup_rebuilds: usize,
     snapshot_setup_reuses: usize,
+    // Phase 8 diagnostics: count CoolProp invocations
+    coolprop_state_calls: usize,
+    coolprop_property_calls: usize,
+    cv_boundary_pressure_inversions: usize,
 }
 
 /// Pre-allocated reusable buffers for RHS computation.
@@ -591,6 +599,30 @@ impl TransientNetworkModel {
         self.rhs_timing.rk4_bookkeeping_time_s
     }
 
+    pub fn rhs_direct_cv_pressure_inversion_time_s(&self) -> f64 {
+        self.rhs_timing.rhs_direct_cv_pressure_inversion_time_s
+    }
+
+    pub fn rhs_direct_cv_validation_time_s(&self) -> f64 {
+        self.rhs_timing.rhs_direct_cv_validation_time_s
+    }
+
+    pub fn rhs_direct_cv_fallback_time_s(&self) -> f64 {
+        self.rhs_timing.rhs_direct_cv_fallback_time_s
+    }
+
+    pub fn coolprop_state_calls(&self) -> usize {
+        self.rhs_timing.coolprop_state_calls
+    }
+
+    pub fn coolprop_property_calls(&self) -> usize {
+        self.rhs_timing.coolprop_property_calls
+    }
+
+    pub fn cv_boundary_pressure_inversions(&self) -> usize {
+        self.rhs_timing.cv_boundary_pressure_inversions
+    }
+
     pub fn execution_plan_checks(&self) -> usize {
         self.rhs_timing.execution_plan_checks
     }
@@ -923,9 +955,16 @@ impl TransientNetworkModel {
                 );
             }
 
+            // Instrument CV boundary work: pressure inversion + validation
+            let cv_boundary_start = Instant::now();
+            self.rhs_timing.cv_boundary_pressure_inversions += 1;
+
             // Try real-fluid boundary computation
             match cv.state_ph_boundary(self.fluid_model.as_ref(), cv_state, p_hint) {
                 Ok((p, h)) => {
+                    self.rhs_timing.rhs_direct_cv_pressure_inversion_time_s +=
+                        cv_boundary_start.elapsed().as_secs_f64();
+
                     // Real-fluid succeeded: update surrogate from this valid state
                     self.last_cv_pressure[idx] = Some(p);
                     self.last_cv_enthalpy[idx] = Some(h); // Store actual h
@@ -964,6 +1003,7 @@ impl TransientNetworkModel {
                 }
                 Err(e) => {
                     // Real-fluid failed: use surrogate fallback
+                    let fallback_start = Instant::now();
                     eprintln!(
                         "[FALLBACK] CV '{}' at t={:.3}s: state_ph_boundary failed: {}",
                         cv.name, time_s, e
@@ -1047,6 +1087,8 @@ impl TransientNetworkModel {
                             }
                         }
                     }
+                    self.rhs_timing.rhs_direct_cv_fallback_time_s +=
+                        fallback_start.elapsed().as_secs_f64();
                 }
             }
         }

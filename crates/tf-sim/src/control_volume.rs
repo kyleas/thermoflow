@@ -62,7 +62,63 @@ impl ControlVolume {
         use tf_core::timing::Timer;
 
         let _timer = Timer::start("cv_pressure_inversion");
+        let start = std::time::Instant::now();
 
+        // NEW HOT PATH: Direct rho,h -> T -> P solve for backends that support it
+        // This eliminates the nested bisection (P bisection + PH solve)
+        let t_hint = p_hint.map(|p| {
+            // Estimate temperature from ideal gas: T ≈ P/(ρ·R)
+            // This is just an initial guess, doesn't need to be accurate
+            let r_approx = 287.0; // Rough gas constant
+            p.value / (rho_target * r_approx)
+        });
+
+        if let Some(result) =
+            fluid.pressure_from_rho_h_direct(&self.composition, rho_target, h, t_hint)
+        {
+            match result {
+                Ok(p) => {
+                    // Record direct path timing
+                    if tf_core::timing::is_enabled() {
+                        tf_core::timing::thermo_timing::PRESSURE_FROM_RHO_H_DIRECT
+                            .record(start.elapsed().as_secs_f64());
+                    }
+                    return Ok(p);
+                }
+                Err(e) => {
+                    // Direct solve failed, fall back to old path
+                    eprintln!(
+                        "Warning: Direct rho,h->T solve failed: {}, falling back to nested path",
+                        e
+                    );
+                }
+            }
+        }
+
+        // FALLBACK PATH: Original nested bisection algorithm
+        // This is kept for backends that don't support direct solve or when it fails
+        let fallback_start = std::time::Instant::now();
+        let result = self.pressure_from_rho_h_fallback(fluid, rho_target, h, p_hint)?;
+
+        // Record fallback path timing
+        if tf_core::timing::is_enabled() {
+            tf_core::timing::thermo_timing::PRESSURE_FROM_RHO_H_FALLBACK
+                .record(fallback_start.elapsed().as_secs_f64());
+        }
+
+        Ok(result)
+    }
+
+    /// Fallback pressure inversion using nested bisection.
+    ///
+    /// This is the original algorithm kept for compatibility and edge cases.
+    fn pressure_from_rho_h_fallback(
+        &self,
+        fluid: &dyn FluidModel,
+        rho_target: f64,
+        h: SpecEnthalpy,
+        p_hint: Option<Pressure>,
+    ) -> SimResult<Pressure> {
         const P_MIN: f64 = 1e3; // 1 kPa minimum
         const P_MAX_INITIAL: f64 = 1e8; //100 MPa maximum
         const MAX_ITER: usize = 50;
@@ -323,6 +379,66 @@ mod tests {
                 println!(
                     "pressure_from_rho_h bracketing test skipped due to CoolProp range limits"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn pressure_from_rho_h_direct_path_consistency() {
+        // Test that the new direct rho,h->T->P path (via CoolProp's solve_pt_from_rho_h)
+        // produces results consistent with the fallback nested bisection path
+
+        let cv = ControlVolume::new(
+            "test".to_string(),
+            0.01,
+            Composition::pure(tf_fluids::Species::N2),
+        )
+        .unwrap();
+
+        let fluid = CoolPropModel::new();
+
+        // Test several representative states
+        let test_cases = vec![
+            (100_000.0, 250.0),   // 1 bar, 250K - cold
+            (200_000.0, 300.0),   // 2 bar, 300K - moderate
+            (500_000.0, 400.0),   // 5 bar, 400K - warm
+            (1_000_000.0, 300.0), // 10 bar, 300K - high pressure
+        ];
+
+        for (p_pa, t_k) in test_cases {
+            let state = fluid
+                .state(
+                    StateInput::PT {
+                        p: tf_core::units::pa(p_pa),
+                        t: tf_core::units::k(t_k),
+                    },
+                    cv.composition.clone(),
+                )
+                .unwrap();
+
+            let h = fluid.h(&state).unwrap();
+            let rho = fluid.rho(&state).unwrap();
+
+            // Recover pressure using the (now optimized) direct path
+            match cv.pressure_from_rho_h(&fluid, rho.value, h, None) {
+                Ok(p_recovered) => {
+                    // Should recover original pressure within tolerance
+                    let rel_error = (p_recovered.value - p_pa).abs() / p_pa;
+                    assert!(
+                        rel_error < 0.01,
+                        "Direct path failed to recover pressure within 1% for P={} Pa, T={} K. Got {} Pa (error: {:.2}%)",
+                        p_pa,
+                        t_k,
+                        p_recovered.value,
+                        rel_error * 100.0
+                    );
+                }
+                Err(e) => {
+                    panic!(
+                        "Direct path failed for valid state P={} Pa, T={} K: {:?}",
+                        p_pa, t_k, e
+                    );
+                }
             }
         }
     }

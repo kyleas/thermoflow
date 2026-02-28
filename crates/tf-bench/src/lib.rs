@@ -75,6 +75,9 @@ pub struct RunMetrics {
     pub rhs_assembly_time_s: Option<f64>,
     pub rhs_surrogate_time_s: Option<f64>,
     pub rk4_bookkeeping_time_s: Option<f64>,
+    pub rhs_direct_cv_pressure_inversion_time_s: Option<f64>,
+    pub rhs_direct_cv_validation_time_s: Option<f64>,
+    pub rhs_direct_cv_fallback_time_s: Option<f64>,
     pub execution_plan_checks: Option<usize>,
     pub execution_plan_unchanged: Option<usize>,
     pub component_rebuilds: Option<usize>,
@@ -124,6 +127,9 @@ pub struct AggregateMetrics {
     pub rhs_assembly_time_median_s: Option<f64>,
     pub rhs_surrogate_time_median_s: Option<f64>,
     pub rk4_bookkeeping_time_median_s: Option<f64>,
+    pub rhs_direct_cv_pressure_inversion_time_median_s: Option<f64>,
+    pub rhs_direct_cv_validation_time_median_s: Option<f64>,
+    pub rhs_direct_cv_fallback_time_median_s: Option<f64>,
     pub execution_plan_checks_median: Option<usize>,
     pub execution_plan_unchanged_median: Option<usize>,
     pub component_rebuilds_median: Option<usize>,
@@ -231,6 +237,14 @@ pub fn run_scenario(
                 .then_some(timing.rhs_surrogate_time_s),
             rk4_bookkeeping_time_s: (timing.rk4_bookkeeping_time_s > 0.0)
                 .then_some(timing.rk4_bookkeeping_time_s),
+            rhs_direct_cv_pressure_inversion_time_s: (timing
+                .rhs_direct_cv_pressure_inversion_time_s
+                > 0.0)
+                .then_some(timing.rhs_direct_cv_pressure_inversion_time_s),
+            rhs_direct_cv_validation_time_s: (timing.rhs_direct_cv_validation_time_s > 0.0)
+                .then_some(timing.rhs_direct_cv_validation_time_s),
+            rhs_direct_cv_fallback_time_s: (timing.rhs_direct_cv_fallback_time_s > 0.0)
+                .then_some(timing.rhs_direct_cv_fallback_time_s),
             execution_plan_checks: (timing.execution_plan_checks > 0)
                 .then_some(timing.execution_plan_checks),
             execution_plan_unchanged: (timing.execution_plan_unchanged > 0)
@@ -302,6 +316,9 @@ fn compute_aggregates(runs: &[RunMetrics], _scenario: &BenchmarkScenario) -> Agg
             rhs_assembly_time_median_s: None,
             rhs_surrogate_time_median_s: None,
             rk4_bookkeeping_time_median_s: None,
+            rhs_direct_cv_pressure_inversion_time_median_s: None,
+            rhs_direct_cv_validation_time_median_s: None,
+            rhs_direct_cv_fallback_time_median_s: None,
             execution_plan_checks_median: None,
             execution_plan_unchanged_median: None,
             component_rebuilds_median: None,
@@ -498,6 +515,32 @@ fn compute_aggregates(runs: &[RunMetrics], _scenario: &BenchmarkScenario) -> Agg
         .get(rk4_bookkeeping_times.len() / 2)
         .copied();
 
+    let mut cv_pressure_inversion_times: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.rhs_direct_cv_pressure_inversion_time_s)
+        .collect();
+    cv_pressure_inversion_times
+        .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let cv_pressure_inversion_time_median = cv_pressure_inversion_times
+        .get(cv_pressure_inversion_times.len() / 2)
+        .copied();
+
+    let mut cv_validation_times: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.rhs_direct_cv_validation_time_s)
+        .collect();
+    cv_validation_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let cv_validation_time_median = cv_validation_times
+        .get(cv_validation_times.len() / 2)
+        .copied();
+
+    let mut cv_fallback_times: Vec<_> = runs
+        .iter()
+        .filter_map(|r| r.rhs_direct_cv_fallback_time_s)
+        .collect();
+    cv_fallback_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let cv_fallback_time_median = cv_fallback_times.get(cv_fallback_times.len() / 2).copied();
+
     let mut execution_plan_checks: Vec<_> = runs
         .iter()
         .filter_map(|r| r.execution_plan_checks)
@@ -602,6 +645,9 @@ fn compute_aggregates(runs: &[RunMetrics], _scenario: &BenchmarkScenario) -> Agg
         rhs_assembly_time_median_s: rhs_assembly_time_median,
         rhs_surrogate_time_median_s: rhs_surrogate_time_median,
         rk4_bookkeeping_time_median_s: rk4_bookkeeping_time_median,
+        rhs_direct_cv_pressure_inversion_time_median_s: cv_pressure_inversion_time_median,
+        rhs_direct_cv_validation_time_median_s: cv_validation_time_median,
+        rhs_direct_cv_fallback_time_median_s: cv_fallback_time_median,
         execution_plan_checks_median,
         execution_plan_unchanged_median,
         component_rebuilds_median,
@@ -723,6 +769,9 @@ impl Default for RunMetrics {
             rhs_assembly_time_s: None,
             rhs_surrogate_time_s: None,
             rk4_bookkeeping_time_s: None,
+            rhs_direct_cv_pressure_inversion_time_s: None,
+            rhs_direct_cv_validation_time_s: None,
+            rhs_direct_cv_fallback_time_s: None,
             execution_plan_checks: None,
             execution_plan_unchanged: None,
             component_rebuilds: None,
@@ -822,6 +871,9 @@ mod tests {
             rhs_assembly_time_s: None,
             rhs_surrogate_time_s: None,
             rk4_bookkeeping_time_s: None,
+            rhs_direct_cv_pressure_inversion_time_s: None,
+            rhs_direct_cv_validation_time_s: None,
+            rhs_direct_cv_fallback_time_s: None,
             execution_plan_checks: None,
             execution_plan_unchanged: None,
             component_rebuilds: None,

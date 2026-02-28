@@ -80,6 +80,9 @@ pub struct RunTimingSummary {
     pub rhs_assembly_time_s: f64,
     pub rhs_surrogate_time_s: f64,
     pub rk4_bookkeeping_time_s: f64,
+    pub rhs_direct_cv_pressure_inversion_time_s: f64,
+    pub rhs_direct_cv_validation_time_s: f64,
+    pub rhs_direct_cv_fallback_time_s: f64,
     pub execution_plan_checks: usize,
     pub execution_plan_unchanged: usize,
     pub component_rebuilds: usize,
@@ -695,6 +698,10 @@ fn execute_transient(
     timing.rhs_lv_derivative_time_s = model.rhs_lv_derivative_time_s();
     timing.rhs_assembly_time_s = model.rhs_assembly_time_s();
     timing.rhs_surrogate_time_s = model.rhs_surrogate_time_s();
+    timing.rhs_direct_cv_pressure_inversion_time_s =
+        model.rhs_direct_cv_pressure_inversion_time_s();
+    timing.rhs_direct_cv_validation_time_s = model.rhs_direct_cv_validation_time_s();
+    timing.rhs_direct_cv_fallback_time_s = model.rhs_direct_cv_fallback_time_s();
     timing.execution_plan_checks = model.execution_plan_checks();
     timing.execution_plan_unchanged = model.execution_plan_unchanged();
     timing.component_rebuilds = model.component_rebuilds();

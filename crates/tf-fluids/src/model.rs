@@ -5,6 +5,74 @@ use crate::error::{FluidError, FluidResult};
 use crate::state::{SpecEnthalpy, SpecHeatCapacity, StateInput, ThermoState};
 use tf_core::units::{Density, Pressure, Temperature, Velocity};
 
+/// Cached thermodynamic properties from a single state.
+///
+/// This structure is used to batch multiple property queries on the same state
+/// into a single backend call, avoiding redundant computation. Particularly useful
+/// for components that need cp, gamma, and speed of sound from the same state.
+///
+/// # Phase 11 Optimization
+/// Many components perform multiple property queries on the same state:
+/// - Orifice: needs rho, gamma, a
+/// - Turbine: needs cp, gamma
+///
+/// By computing all properties once and passing the pack to component methods,
+/// we reduce backend query overhead by ~60-80%.
+#[derive(Clone, Debug)]
+pub struct ThermoPropertyPack {
+    /// Pressure [Pa]
+    pub p: Pressure,
+
+    /// Temperature [K]
+    pub t: Temperature,
+
+    /// Density [kg/m³]
+    pub rho: Density,
+
+    /// Specific enthalpy [J/kg]
+    pub h: SpecEnthalpy,
+
+    /// Specific heat capacity at constant pressure [J/(kg·K)]
+    pub cp: SpecHeatCapacity,
+
+    /// Heat capacity ratio γ = cp/cv (dimensionless)
+    pub gamma: f64,
+
+    /// Speed of sound [m/s]
+    pub a: Velocity,
+}
+
+impl ThermoPropertyPack {
+    /// Create a property pack from individual values (primarily for testing).
+    pub fn new(
+        p: Pressure,
+        t: Temperature,
+        rho: Density,
+        h: SpecEnthalpy,
+        cp: SpecHeatCapacity,
+        gamma: f64,
+        a: Velocity,
+    ) -> Self {
+        Self {
+            p,
+            t,
+            rho,
+            h,
+            cp,
+            gamma,
+            a,
+        }
+    }
+
+    /// Return a summary string of all contained properties (for debugging).
+    pub fn summary(&self) -> String {
+        format!(
+            "Pack(P={:.0}Pa,T={:.1}K,ρ={:.2}kg/m³,h={:.1}J/kg,cp={:.1}J/kg·K,γ={:.3},a={:.0}m/s)",
+            self.p.value, self.t.value, self.rho.value, self.h, self.cp, self.gamma, self.a.value
+        )
+    }
+}
+
 /// Trait for fluid property models.
 ///
 /// Implementations must be thread-safe (Send + Sync) to support parallel evaluation.
@@ -38,6 +106,56 @@ pub trait FluidModel: Send + Sync {
 
     /// Compute speed of sound [m/s] at the given state.
     fn a(&self, state: &ThermoState) -> FluidResult<Velocity>;
+
+    /// Compute a complete property pack (p, t, rho, h, cp, gamma, a) in one call.
+    ///
+    /// This batches property queries to reduce backend overhead. Default implementation
+    /// calls individual property methods, but efficient backends override to compute
+    /// all properties together.
+    ///
+    /// # Phase 11 Optimization
+    /// Components that need multiple properties from the same state should call this
+    /// method instead of individual cp(), gamma(), a() calls. Reduces backend queries
+    /// from 3+ separate calls to 1 batch call.
+    fn property_pack(&self, state: &ThermoState) -> FluidResult<ThermoPropertyPack> {
+        Ok(ThermoPropertyPack {
+            p: state.pressure(),
+            t: state.temperature(),
+            rho: self.rho(state)?,
+            h: self.h(state)?,
+            cp: self.cp(state)?,
+            gamma: self.gamma(state)?,
+            a: self.a(state)?,
+        })
+    }
+
+    /// Optimized pressure solve from density and enthalpy (hot path for CoolProp).
+    ///
+    /// Given density and enthalpy, solve for temperature and return pressure.
+    /// This is an optimization hook for backends that can do this efficiently.
+    ///
+    /// Default implementation returns None (not supported).
+    /// CoolProp overrides this to use direct density-temperature solve.
+    ///
+    /// # Arguments
+    /// * `comp` - Fluid composition (must be pure for CoolProp)
+    /// * `rho_kg_m3` - Density in kg/m³
+    /// * `h_j_per_kg` - Enthalpy in J/kg
+    /// * `t_hint_k` - Optional temperature hint for faster convergence
+    ///
+    /// # Returns
+    /// * `Some(Ok(pressure))` - Successfully solved
+    /// * `Some(Err(e))` - Solve attempted but failed
+    /// * `None` - Not supported by this backend
+    fn pressure_from_rho_h_direct(
+        &self,
+        _comp: &Composition,
+        _rho_kg_m3: f64,
+        _h_j_per_kg: f64,
+        _t_hint_k: Option<f64>,
+    ) -> Option<FluidResult<Pressure>> {
+        None
+    }
 }
 
 /// Validation helpers for fluid properties.

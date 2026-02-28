@@ -103,9 +103,11 @@ impl Turbine {
 
         let pr = p_out.value / p_in.value; // pressure ratio < 1
 
-        // Get gas properties at inlet
-        let gamma = fluid.gamma(ports.inlet)?;
-        let cp = fluid.cp(ports.inlet)?;
+        // Get gas properties at inlet using property pack (Phase 11 optimization)
+        // This batches cp and gamma queries into a single backend call
+        let pack = fluid.property_pack(ports.inlet)?;
+        let gamma = pack.gamma;
+        let cp = pack.cp;
 
         // Isentropic temperature ratio: T_out_s/T_in = (P_out/P_in)^((γ-1)/γ)
         let exponent = (gamma - 1.0) / gamma;

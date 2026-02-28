@@ -65,10 +65,12 @@ impl Orifice {
 
         let p_down = if p_in > p_out { p_out } else { p_in };
 
-        // Get upstream properties
-        let rho_up = fluid.rho(state_up)?.value;
-        let gamma = fluid.gamma(state_up)?;
-        let a_up = fluid.a(state_up)?.value; // speed of sound
+        // Get upstream properties using property pack (Phase 11 optimization)
+        // This batches rho, gamma, a queries into a single backend call
+        let pack = fluid.property_pack(state_up)?;
+        let rho_up = pack.rho.value;
+        let gamma = pack.gamma;
+        let a_up = pack.a.value; // speed of sound
 
         check_finite(rho_up, "upstream density")?;
         check_finite(gamma, "gamma")?;

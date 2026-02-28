@@ -115,6 +115,137 @@ impl AccumulatingTimer {
     }
 }
 
+/// Thermodynamic property query timers (Phase 11).
+pub mod thermo_timing {
+    use super::AccumulatingTimer;
+
+    /// Time spent in cp() property queries
+    pub static CP_CALLS: AccumulatingTimer = AccumulatingTimer::new();
+    /// Time spent in gamma() property queries
+    pub static GAMMA_CALLS: AccumulatingTimer = AccumulatingTimer::new();
+    /// Time spent in a() (speed of sound) property queries
+    pub static A_CALLS: AccumulatingTimer = AccumulatingTimer::new();
+    /// Time spent in property_pack() batch queries (if implemented)
+    pub static PROPERTY_PACK_CALLS: AccumulatingTimer = AccumulatingTimer::new();
+    /// Time spent in state creation (backend state instantiation)
+    pub static STATE_CREATION: AccumulatingTimer = AccumulatingTimer::new();
+    /// Time spent in pressure_from_rho_h direct path
+    pub static PRESSURE_FROM_RHO_H_DIRECT: AccumulatingTimer = AccumulatingTimer::new();
+    /// Time spent in pressure_from_rho_h fallback (nested bisection)
+    pub static PRESSURE_FROM_RHO_H_FALLBACK: AccumulatingTimer = AccumulatingTimer::new();
+
+    /// Reset all thermo timers.
+    pub fn reset_all() {
+        CP_CALLS.reset();
+        GAMMA_CALLS.reset();
+        A_CALLS.reset();
+        PROPERTY_PACK_CALLS.reset();
+        STATE_CREATION.reset();
+        PRESSURE_FROM_RHO_H_DIRECT.reset();
+        PRESSURE_FROM_RHO_H_FALLBACK.reset();
+    }
+
+    /// Print thermo timing summary.
+    pub fn print_summary() {
+        use super::is_enabled;
+        if !is_enabled() {
+            return;
+        }
+
+        println!("\n=== Thermodynamic Query Breakdown ===");
+
+        let cp_count = CP_CALLS.count();
+        if cp_count > 0 {
+            println!(
+                "cp() calls:          {} calls, {:.3}s total, {:.4}ms avg",
+                cp_count,
+                CP_CALLS.total_seconds(),
+                CP_CALLS.average_seconds() * 1000.0
+            );
+        }
+
+        let gamma_count = GAMMA_CALLS.count();
+        if gamma_count > 0 {
+            println!(
+                "gamma() calls:       {} calls, {:.3}s total, {:.4}ms avg",
+                gamma_count,
+                GAMMA_CALLS.total_seconds(),
+                GAMMA_CALLS.average_seconds() * 1000.0
+            );
+        }
+
+        let a_count = A_CALLS.count();
+        if a_count > 0 {
+            println!(
+                "a() calls:           {} calls, {:.3}s total, {:.4}ms avg",
+                a_count,
+                A_CALLS.total_seconds(),
+                A_CALLS.average_seconds() * 1000.0
+            );
+        }
+
+        let pack_count = PROPERTY_PACK_CALLS.count();
+        if pack_count > 0 {
+            println!(
+                "property_pack():     {} calls, {:.3}s total, {:.4}ms avg",
+                pack_count,
+                PROPERTY_PACK_CALLS.total_seconds(),
+                PROPERTY_PACK_CALLS.average_seconds() * 1000.0
+            );
+        }
+
+        let state_count = STATE_CREATION.count();
+        if state_count > 0 {
+            println!(
+                "state creation:      {} calls, {:.3}s total, {:.4}ms avg",
+                state_count,
+                STATE_CREATION.total_seconds(),
+                STATE_CREATION.average_seconds() * 1000.0
+            );
+        }
+
+        let p_direct_count = PRESSURE_FROM_RHO_H_DIRECT.count();
+        if p_direct_count > 0 {
+            println!(
+                "pressure_from_rho_h (direct): {} calls, {:.3}s total, {:.4}ms avg",
+                p_direct_count,
+                PRESSURE_FROM_RHO_H_DIRECT.total_seconds(),
+                PRESSURE_FROM_RHO_H_DIRECT.average_seconds() * 1000.0
+            );
+        }
+
+        let p_fallback_count = PRESSURE_FROM_RHO_H_FALLBACK.count();
+        if p_fallback_count > 0 {
+            println!(
+                "pressure_from_rho_h (fallback): {} calls, {:.3}s total, {:.4}ms avg",
+                p_fallback_count,
+                PRESSURE_FROM_RHO_H_FALLBACK.total_seconds(),
+                PRESSURE_FROM_RHO_H_FALLBACK.average_seconds() * 1000.0
+            );
+        }
+
+        let total_thermo = CP_CALLS.total_seconds()
+            + GAMMA_CALLS.total_seconds()
+            + A_CALLS.total_seconds()
+            + PROPERTY_PACK_CALLS.total_seconds();
+        if total_thermo > 0.0 {
+            println!(
+                "TOTAL thermo queries: {:.3}s ({:.1}% through cp+gamma+a)",
+                total_thermo,
+                (total_thermo
+                    / (CP_CALLS.total_seconds()
+                        + GAMMA_CALLS.total_seconds()
+                        + A_CALLS.total_seconds()
+                        + PROPERTY_PACK_CALLS.total_seconds())
+                    * 100.0)
+                    .max(0.0)
+            );
+        }
+
+        println!("======================================\n");
+    }
+}
+
 /// Performance statistics collector.
 #[derive(Default)]
 pub struct PerfStats {
@@ -175,5 +306,8 @@ impl PerfStats {
         }
 
         println!("==========================\n");
+
+        // Print thermo breakdown
+        thermo_timing::print_summary();
     }
 }

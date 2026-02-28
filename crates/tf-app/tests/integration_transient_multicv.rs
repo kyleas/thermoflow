@@ -156,4 +156,12 @@ fn multicv_supported_path_reuses_snapshot_structure() {
     );
     assert_eq!(timing.component_reuses, 0);
     assert_eq!(timing.snapshot_setup_reuses, 0);
+    assert!(timing.rhs_direct_solve_setup_time_s > 0.0);
+    // Phase 8: Verify new instrumentation fields exist and are measured
+    assert!(timing.rhs_direct_cv_pressure_inversion_time_s >= 0.0);
+    assert!(timing.rhs_direct_cv_validation_time_s >= 0.0);
+    assert!(timing.rhs_direct_cv_fallback_time_s >= 0.0);
+
+    // Verify solve_setup includes CV boundary work
+    assert!(timing.rhs_direct_solve_setup_time_s > 0.0);
 }

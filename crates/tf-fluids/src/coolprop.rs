@@ -5,7 +5,7 @@ use crate::error::{FluidError, FluidResult};
 use crate::model::{FluidModel, validation};
 use crate::state::{SpecEnthalpy, SpecHeatCapacity, StateInput, ThermoState};
 use rfluids::prelude::*;
-use tf_core::units::{Density, Velocity, k};
+use tf_core::units::{Density, Pressure, Velocity, k};
 
 /// CoolProp backend for fluid properties.
 ///
@@ -85,6 +85,150 @@ impl CoolPropModel {
 
         // Return best estimate if we hit max iterations
         Ok(0.5 * (t_low + t_high))
+    }
+
+    /// Solve for temperature at fixed density, then extract pressure.
+    ///
+    /// This is the optimized hot path for control volume pressure inversion.
+    /// Given density and enthalpy, solve for T such that h(rho, T) = h_target,
+    /// then extract pressure from the same backend state.
+    ///
+    /// This eliminates the nested bisection (P bisection + PH solve) structure
+    /// by working directly in density-temperature space.
+    ///
+    /// # Arguments
+    /// * `pure` - Pure substance
+    /// * `rho_kg_m3` - Density in kg/m³
+    /// * `h_target` - Target enthalpy in J/kg
+    /// * `t_hint` - Optional temperature hint for faster convergence
+    ///
+    /// # Returns
+    /// * `Ok((temperature_k, pressure_pa))` - Temperature in K and pressure in Pa
+    pub fn solve_pt_from_rho_h(
+        &self,
+        pure: Pure,
+        rho_kg_m3: f64,
+        h_target: f64,
+        t_hint: Option<f64>,
+    ) -> FluidResult<(f64, f64)> {
+        // Temperature search bounds [K]
+        const T_MIN: f64 = 100.0;
+        const T_MAX: f64 = 2000.0;
+        const MAX_ITER: usize = 50;
+        const H_TOL: f64 = 1.0; // J/kg - absolute tolerance
+
+        // Initialize bracket
+        let mut t_low = T_MIN;
+        let mut t_high = T_MAX;
+
+        // If we have a hint, try to use a tighter bracket
+        if let Some(t_hint_val) = t_hint
+            && t_hint_val > T_MIN
+            && t_hint_val < T_MAX
+        {
+            // Use ±50% bracket around hint
+            t_low = (t_hint_val * 0.5).max(T_MIN);
+            t_high = (t_hint_val * 1.5).min(T_MAX);
+        }
+
+        // Create fluid instance at lower bound
+        let mut fluid = Fluid::from(pure)
+            .in_state(
+                FluidInput::density(rho_kg_m3),
+                FluidInput::temperature(t_low),
+            )
+            .map_err(|e| FluidError::Backend {
+                message: format!(
+                    "rfluids error at rho={} kg/m³, T={} K: {}",
+                    rho_kg_m3, t_low, e
+                ),
+            })?;
+
+        let h_low = fluid.enthalpy().map_err(|e| FluidError::Backend {
+            message: format!("rfluids error getting enthalpy: {}", e),
+        })?;
+
+        // Evaluate at upper bound (reuse fluid instance)
+        fluid = Fluid::from(pure)
+            .in_state(
+                FluidInput::density(rho_kg_m3),
+                FluidInput::temperature(t_high),
+            )
+            .map_err(|e| FluidError::Backend {
+                message: format!(
+                    "rfluids error at rho={} kg/m³, T={} K: {}",
+                    rho_kg_m3, t_high, e
+                ),
+            })?;
+
+        let h_high = fluid.enthalpy().map_err(|e| FluidError::Backend {
+            message: format!("rfluids error getting enthalpy: {}", e),
+        })?;
+
+        // Check if target is bracketed
+        if h_target < h_low || h_target > h_high {
+            return Err(FluidError::OutOfRange {
+                what: "enthalpy outside valid range for given density",
+            });
+        }
+
+        // Bisection with persistent fluid reuse
+        for _ in 0..MAX_ITER {
+            let t_mid = 0.5 * (t_low + t_high);
+
+            // Reuse fluid instance - update state to new temperature
+            fluid = Fluid::from(pure)
+                .in_state(
+                    FluidInput::density(rho_kg_m3),
+                    FluidInput::temperature(t_mid),
+                )
+                .map_err(|e| FluidError::Backend {
+                    message: format!(
+                        "rfluids error at rho={} kg/m³, T={} K: {}",
+                        rho_kg_m3, t_mid, e
+                    ),
+                })?;
+
+            let h_mid = fluid.enthalpy().map_err(|e| FluidError::Backend {
+                message: format!("rfluids error getting enthalpy: {}", e),
+            })?;
+
+            // Check convergence
+            if (h_mid - h_target).abs() < H_TOL {
+                // Extract pressure from converged state
+                let p_pa = fluid.pressure().map_err(|e| FluidError::Backend {
+                    message: format!("rfluids error getting pressure: {}", e),
+                })?;
+                return Ok((t_mid, p_pa));
+            }
+
+            // Update bracket
+            if h_mid < h_target {
+                t_low = t_mid;
+            } else {
+                t_high = t_mid;
+            }
+        }
+
+        // Convergence failed, but return best estimate
+        let t_final = 0.5 * (t_low + t_high);
+        fluid = Fluid::from(pure)
+            .in_state(
+                FluidInput::density(rho_kg_m3),
+                FluidInput::temperature(t_final),
+            )
+            .map_err(|e| FluidError::Backend {
+                message: format!(
+                    "rfluids error at rho={} kg/m³, T={} K: {}",
+                    rho_kg_m3, t_final, e
+                ),
+            })?;
+
+        let p_pa = fluid.pressure().map_err(|e| FluidError::Backend {
+            message: format!("rfluids error getting pressure: {}", e),
+        })?;
+
+        Ok((t_final, p_pa))
     }
 }
 
@@ -200,6 +344,11 @@ impl FluidModel for CoolPropModel {
     }
 
     fn cp(&self, state: &ThermoState) -> FluidResult<SpecHeatCapacity> {
+        use tf_core::timing;
+
+        let _timer = timing::Timer::start("cp_property_query");
+        let start = std::time::Instant::now();
+
         let species = state
             .composition()
             .is_pure()
@@ -220,10 +369,21 @@ impl FluidModel for CoolPropModel {
         })?;
 
         validation::validate_cp(cp)?;
+
+        // Record timing
+        if timing::is_enabled() {
+            timing::thermo_timing::CP_CALLS.record(start.elapsed().as_secs_f64());
+        }
+
         Ok(cp)
     }
 
     fn gamma(&self, state: &ThermoState) -> FluidResult<f64> {
+        use tf_core::timing;
+
+        let _timer = timing::Timer::start("gamma_property_query");
+        let start = std::time::Instant::now();
+
         let species = state
             .composition()
             .is_pure()
@@ -260,10 +420,21 @@ impl FluidModel for CoolPropModel {
 
         let gamma = cp / cv;
         validation::validate_gamma(gamma)?;
+
+        // Record timing
+        if timing::is_enabled() {
+            timing::thermo_timing::GAMMA_CALLS.record(start.elapsed().as_secs_f64());
+        }
+
         Ok(gamma)
     }
 
     fn a(&self, state: &ThermoState) -> FluidResult<Velocity> {
+        use tf_core::timing;
+
+        let _timer = timing::Timer::start("a_property_query");
+        let start = std::time::Instant::now();
+
         let species = state
             .composition()
             .is_pure()
@@ -287,7 +458,117 @@ impl FluidModel for CoolPropModel {
         let a = Velocity::new::<meter_per_second>(a_val);
 
         validation::validate_speed_of_sound(a)?;
+
+        // Record timing
+        if timing::is_enabled() {
+            timing::thermo_timing::A_CALLS.record(start.elapsed().as_secs_f64());
+        }
+
         Ok(a)
+    }
+
+    fn property_pack(&self, state: &ThermoState) -> FluidResult<crate::model::ThermoPropertyPack> {
+        use tf_core::timing;
+
+        let _timer = timing::Timer::start("property_pack_query");
+        let start = std::time::Instant::now();
+
+        let species = state
+            .composition()
+            .is_pure()
+            .ok_or(FluidError::NotSupported {
+                what: "mixtures not supported",
+            })?;
+
+        let pure = species.rfluids_pure().ok_or(FluidError::NotSupported {
+            what: "species not supported by rfluids",
+        })?;
+
+        let p_pa = state.pressure().value;
+        let t_k = state.temperature().value;
+
+        // Create single fluid instance and batch all property queries
+        let mut fluid = self.fluid_at_pt(pure, p_pa, t_k)?;
+
+        // Query all properties from the same fluid instance (no redundant creations)
+        let rho = fluid.density().map_err(|e| FluidError::Backend {
+            message: format!("rfluids error getting density: {}", e),
+        })?;
+
+        let h = fluid.enthalpy().map_err(|e| FluidError::Backend {
+            message: format!("rfluids error getting enthalpy: {}", e),
+        })?;
+
+        let cp = fluid.specific_heat().map_err(|e| FluidError::Backend {
+            message: format!("rfluids error getting cp: {}", e),
+        })?;
+
+        let a_val = fluid.sound_speed().map_err(|e| FluidError::Backend {
+            message: format!("rfluids error getting sound speed: {}", e),
+        })?;
+
+        // Compute gamma from cp and density as before
+        let r_specific = p_pa / (rho * t_k);
+        let cv = cp - r_specific;
+
+        if cv <= 0.0 || !cv.is_finite() {
+            return Err(FluidError::Backend {
+                message: "Failed to compute cv for gamma calculation in property_pack".into(),
+            });
+        }
+
+        let gamma = cp / cv;
+
+        use uom::si::velocity::meter_per_second;
+        let a = Velocity::new::<meter_per_second>(a_val);
+
+        // Validate all computed properties
+        validation::validate_cp(cp)?;
+        validation::validate_gamma(gamma)?;
+        validation::validate_speed_of_sound(a)?;
+
+        let pack = crate::model::ThermoPropertyPack {
+            p: state.pressure(),
+            t: state.temperature(),
+            rho: {
+                use uom::si::mass_density::kilogram_per_cubic_meter;
+                Density::new::<kilogram_per_cubic_meter>(rho)
+            },
+            h,
+            cp,
+            gamma,
+            a,
+        };
+
+        // Record timing
+        if timing::is_enabled() {
+            timing::thermo_timing::PROPERTY_PACK_CALLS.record(start.elapsed().as_secs_f64());
+        }
+
+        Ok(pack)
+    }
+
+    fn pressure_from_rho_h_direct(
+        &self,
+        comp: &Composition,
+        rho_kg_m3: f64,
+        h_j_per_kg: f64,
+        t_hint_k: Option<f64>,
+    ) -> Option<FluidResult<Pressure>> {
+        // Only support pure fluids
+        let species = comp.is_pure()?;
+        let pure = species.rfluids_pure()?;
+
+        // Call the direct solve method
+        let result = self.solve_pt_from_rho_h(pure, rho_kg_m3, h_j_per_kg, t_hint_k);
+
+        match result {
+            Ok((_t_k, p_pa)) => {
+                use uom::si::pressure::pascal;
+                Some(Ok(Pressure::new::<pascal>(p_pa)))
+            }
+            Err(e) => Some(Err(e)),
+        }
     }
 }
 

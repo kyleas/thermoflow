@@ -46,7 +46,7 @@ pub mod surrogate;
 pub use composition::Composition;
 pub use coolprop::CoolPropModel;
 pub use error::{FluidError, FluidResult};
-pub use model::FluidModel;
+pub use model::{FluidModel, ThermoPropertyPack};
 pub use species::Species;
 pub use state::{SpecEnthalpy, SpecEntropy, SpecHeatCapacity, StateInput, ThermoState};
 pub use surrogate::FrozenPropertySurrogate;
