@@ -31,6 +31,17 @@ pub enum ComponentKindChoice {
     Turbine,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ControlBlockKindChoice {
+    #[default]
+    Constant,
+    MeasuredVariable,
+    PIController,
+    PIDController,
+    FirstOrderActuator,
+    ActuatorCommand,
+}
+
 #[derive(Default)]
 pub struct InspectActions {
     pub add_node: Option<NodeKindChoice>,

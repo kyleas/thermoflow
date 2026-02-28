@@ -141,7 +141,7 @@ Compare results across multiple runs. Create parameter sweeps, sensitivity matri
 - Steady-state fluid network simulation
 - Transient simulation for fixed-topology systems (single-CV and supported multi-CV benchmarks)
 - Closed-loop transient controls (measured variable, sampled PI/PID, actuator-driven valve)
-- P&ID editor (basic node/component creation and editing)
+- P&ID editor (node/component creation, control block placement, signal wiring)
 - Project file format (YAML)
 - Run caching and time-series storage
 - CLI with full command set

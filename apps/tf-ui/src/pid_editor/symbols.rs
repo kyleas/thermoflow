@@ -95,7 +95,6 @@ pub fn draw_component_symbol(
     }
 }
 
-#[allow(dead_code)]
 pub fn draw_control_block_symbol(
     painter: &egui::Painter,
     block_kind: &ControlBlockKindDef,

@@ -193,7 +193,6 @@ impl PidLayout {
             });
     }
 
-    #[allow(dead_code)]
     pub fn ensure_control_block(&mut self, block_id: &str, pos: Pos2) {
         self.control_blocks
             .entry(block_id.to_string())

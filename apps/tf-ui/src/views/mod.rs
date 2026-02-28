@@ -5,7 +5,8 @@ pub mod plot_view;
 pub mod run_view;
 
 pub use inspect_view::{
-    ComponentKindChoice, InspectActions, InspectView, NewComponentSpec, NodeKindChoice,
+    ComponentKindChoice, ControlBlockKindChoice, InspectActions, InspectView, NewComponentSpec,
+    NodeKindChoice,
 };
 pub use module_view::ModuleView;
 pub use pid_view::PidView;

@@ -1,13 +1,16 @@
 use egui::{Pos2, Rect};
 use std::collections::HashMap;
-use tf_project::schema::{ComponentKind, NodeKind, NodeOverlayDef, OverlaySettingsDef, Project};
+use tf_project::schema::{
+    ComponentKind, ControlBlockDef, ControlBlockKindDef, ControlSystemDef, MeasuredVariableDef,
+    NodeKind, NodeOverlayDef, OverlaySettingsDef, Project,
+};
 use tf_results::{RunStore, TimeseriesRecord};
 
 use crate::pid_editor::{
-    GRID_SPACING, PidEditorState, PidLayout, autoroute, draw_component_symbol, draw_node_symbol,
-    is_orthogonal, normalize_orthogonal, snap_to_grid,
+    GRID_SPACING, PidEditorState, PidLayout, autoroute, draw_component_symbol,
+    draw_control_block_symbol, draw_node_symbol, is_orthogonal, normalize_orthogonal, snap_to_grid,
 };
-use crate::views::ComponentKindChoice;
+use crate::views::{ComponentKindChoice, ControlBlockKindChoice};
 
 pub struct PidView {
     last_system_id: Option<String>,
@@ -18,6 +21,12 @@ pub struct PidView {
     add_component_kind: ComponentKindChoice,
     pending_component_kind: Option<ComponentKindChoice>,
     pending_from_node: Option<String>,
+    add_control_block_kind: ControlBlockKindChoice,
+    pending_control_block_kind: Option<ControlBlockKindChoice>,
+    pending_signal_from_block: Option<String>,
+    pending_signal_to_input: Option<String>,
+    selected_control_block_id: Option<String>,
+    selected_signal_connection_index: Option<usize>,
     grid_enabled: bool,
     hide_junction_names: bool,
     cached_run_id: Option<String>,
@@ -38,6 +47,12 @@ impl Default for PidView {
             add_component_kind: ComponentKindChoice::default(),
             pending_component_kind: None,
             pending_from_node: None,
+            add_control_block_kind: ControlBlockKindChoice::default(),
+            pending_control_block_kind: None,
+            pending_signal_from_block: None,
+            pending_signal_to_input: None,
+            selected_control_block_id: None,
+            selected_signal_connection_index: None,
             grid_enabled: true,
             hide_junction_names: false,
             cached_run_id: None,
@@ -58,6 +73,11 @@ impl PidView {
         self.editor = PidEditorState::default();
         self.pending_component_kind = None;
         self.pending_from_node = None;
+        self.pending_control_block_kind = None;
+        self.pending_signal_from_block = None;
+        self.pending_signal_to_input = None;
+        self.selected_control_block_id = None;
+        self.selected_signal_connection_index = None;
     }
 
     pub fn get_node_overlay(&self, node_id: &str) -> Option<&NodeOverlayDef> {
@@ -235,6 +255,89 @@ impl PidView {
                     }
                 });
 
+                // Control block insertion toolbar
+                ui.horizontal(|ui| {
+                    ui.separator();
+                    ui.label("Add control block:");
+                    egui::ComboBox::from_id_salt("pid_add_control_block")
+                        .selected_text(control_block_kind_label(self.add_control_block_kind))
+                        .show_ui(ui, |ui| {
+                            for kind in [
+                                ControlBlockKindChoice::Constant,
+                                ControlBlockKindChoice::MeasuredVariable,
+                                ControlBlockKindChoice::PIController,
+                                ControlBlockKindChoice::PIDController,
+                                ControlBlockKindChoice::FirstOrderActuator,
+                                ControlBlockKindChoice::ActuatorCommand,
+                            ] {
+                                ui.selectable_value(
+                                    &mut self.add_control_block_kind,
+                                    kind,
+                                    control_block_kind_label(kind),
+                                );
+                            }
+                        });
+                    if ui.button("Place block").clicked() {
+                        self.pending_control_block_kind = Some(self.add_control_block_kind);
+                        *selected_component_id = None;
+                        *selected_node_id = None;
+                    }
+                    if let Some(kind) = self.pending_control_block_kind {
+                        ui.label(format!(
+                            "Click to place ({})",
+                            control_block_kind_label(kind)
+                        ));
+                    }
+                });
+
+                // Signal wiring toolbar
+                ui.horizontal(|ui| {
+                    ui.separator();
+                    if ui.button("Wire Signal").clicked() {
+                        self.pending_signal_from_block = None;
+                        self.pending_signal_to_input = None;
+                        // We'll use a flag to indicate wiring mode
+                        // For now, just start with no pending blocks
+                        *selected_component_id = None;
+                        *selected_node_id = None;
+                    }
+                    if self.pending_signal_from_block.is_some() {
+                        if let Some(from_id) = &self.pending_signal_from_block {
+                            if self.pending_signal_to_input.is_none() {
+                                ui.label(format!(
+                                    "Wiring from '{}', click destination block",
+                                    from_id
+                                ));
+                            } else {
+                                ui.label("Select input port");
+                            }
+                        }
+                    }
+                    if ui.button("Cancel Wire").clicked() {
+                        self.pending_signal_from_block = None;
+                        self.pending_signal_to_input = None;
+                    }
+                });
+
+                // Deletion toolbar
+                ui.horizontal(|ui| {
+                    ui.separator();
+                    if let Some(block_id) = self.selected_control_block_id.clone() {
+                        if ui.button(format!("Delete Block '{}'", block_id)).clicked() {
+                            self.delete_control_block(system, &block_id);
+                            self.selected_control_block_id = None;
+                            should_save_layout = true;
+                        }
+                    }
+                    if let Some(idx) = self.selected_signal_connection_index {
+                        if ui.button("Delete Signal Wire").clicked() {
+                            self.delete_signal_connection(system, idx);
+                            self.selected_signal_connection_index = None;
+                            should_save_layout = true;
+                        }
+                    }
+                });
+
                 if let Some(node_id) = selected_node_id.clone() {
                     if let Some(node_layout) = self.layout.nodes.get_mut(&node_id) {
                         let mut changed = false;
@@ -396,7 +499,61 @@ impl PidView {
 
                 if response.clicked() {
                     if let Some(click_pos) = pointer {
-                        if let Some(node_id) = self.hit_test_node(system, click_pos) {
+                        // Check if we're placing a control block
+                        if let Some(kind) = self.pending_control_block_kind {
+                            // Place control block at click position
+                            let snapped_pos = if self.grid_enabled {
+                                snap_to_grid(click_pos)
+                            } else {
+                                click_pos
+                            };
+                            let _new_block_id = self.add_control_block(system, kind, snapped_pos);
+                            self.pending_control_block_kind = None;
+                            // Note: we don't have selected_control_block_id in the signature yet
+                            // so we'll skip selection for now
+                            *selected_component_id = None;
+                            *selected_node_id = None;
+                            should_save_layout = true;
+                        } else if let Some(block_id) =
+                            self.hit_test_control_block(system, click_pos)
+                        {
+                            // Handle control block click for signal wiring or selection
+                            if let Some(from_block) = self.pending_signal_from_block.clone() {
+                                // Complete the wire
+                                if from_block != block_id {
+                                    // Determine default input for the destination block
+                                    let to_input = get_default_input_for_block(system, &block_id);
+                                    if let Some(input) = to_input {
+                                        self.add_signal_connection(
+                                            system,
+                                            &from_block,
+                                            &block_id,
+                                            &input,
+                                        );
+                                        should_save_layout = true;
+                                    }
+                                }
+                                self.pending_signal_from_block = None;
+                                self.pending_signal_to_input = None;
+                                self.selected_control_block_id = None;
+                                self.selected_signal_connection_index = None;
+                            } else if self.pending_signal_from_block.is_none() {
+                                // Not in wiring mode - check if we should start wiring or just select
+                                // For now, just select the block
+                                self.selected_control_block_id = Some(block_id);
+                                self.selected_signal_connection_index = None;
+                            } else {
+                                // Start wiring from this block (if it has an output)
+                                if block_has_output(system, &block_id) {
+                                    self.pending_signal_from_block = Some(block_id);
+                                    self.pending_signal_to_input = None;
+                                    self.selected_control_block_id = None;
+                                    self.selected_signal_connection_index = None;
+                                }
+                            }
+                            *selected_component_id = None;
+                            *selected_node_id = None;
+                        } else if let Some(node_id) = self.hit_test_node(system, click_pos) {
                             if let Some(kind) = self.pending_component_kind {
                                 if let Some(from_id) = self.pending_from_node.clone() {
                                     if from_id != node_id {
@@ -572,6 +729,100 @@ impl PidView {
                                     );
                                 }
                             }
+                        }
+                    }
+                }
+
+                // Render control blocks if controls exist
+                if let Some(ref controls) = system.controls {
+                    // First render signal connections (so they appear behind blocks)
+                    for signal_conn in &self.layout.signal_connections {
+                        if signal_conn.points.len() >= 2 {
+                            // Draw dashed line for signal connections
+                            let signal_color = egui::Color32::from_rgb(100, 255, 100); // Green for signals
+
+                            for i in 0..signal_conn.points.len() - 1 {
+                                let from = signal_conn.points[i];
+                                let to = signal_conn.points[i + 1];
+
+                                // Draw dashed line
+                                let dash_length = 8.0;
+                                let gap_length = 4.0;
+                                let total_length = (to - from).length();
+                                let direction = (to - from) / total_length;
+
+                                let mut current_pos = from;
+                                let mut distance = 0.0;
+
+                                while distance < total_length {
+                                    let next_distance = (distance + dash_length).min(total_length);
+                                    let next_pos = from + direction * next_distance;
+
+                                    painter.line_segment(
+                                        [current_pos, next_pos],
+                                        egui::Stroke::new(2.0, signal_color),
+                                    );
+
+                                    distance = next_distance + gap_length;
+                                    current_pos = from + direction * distance;
+                                }
+                            }
+
+                            // Draw arrow at the end
+                            if let (Some(&from), Some(&to)) = (
+                                signal_conn.points.get(signal_conn.points.len() - 2),
+                                signal_conn.points.last(),
+                            ) {
+                                let dir = (to - from).normalized();
+                                let arrow_size = 8.0;
+                                let arrow_angle = std::f32::consts::PI / 6.0; // 30 degrees
+
+                                let perp = egui::vec2(-dir.y, dir.x);
+                                let arrow_left =
+                                    to - dir * arrow_size + perp * arrow_size * arrow_angle.tan();
+                                let arrow_right =
+                                    to - dir * arrow_size - perp * arrow_size * arrow_angle.tan();
+
+                                painter.line_segment(
+                                    [to, arrow_left],
+                                    egui::Stroke::new(2.0, signal_color),
+                                );
+                                painter.line_segment(
+                                    [to, arrow_right],
+                                    egui::Stroke::new(2.0, signal_color),
+                                );
+                            }
+                        }
+                    }
+
+                    // Then render blocks on top
+                    for block in &controls.blocks {
+                        if let Some(block_layout) = self.layout.control_blocks.get(&block.id) {
+                            let selected =
+                                self.selected_control_block_id.as_ref() == Some(&block.id);
+                            let color = if selected {
+                                egui::Color32::YELLOW
+                            } else {
+                                egui::Color32::from_rgb(150, 200, 255) // Light cyan for control blocks
+                            };
+
+                            draw_control_block_symbol(
+                                &painter,
+                                &block.kind,
+                                block_layout.pos,
+                                color,
+                            );
+
+                            // Draw block name
+                            painter.text(
+                                block_layout.pos
+                                    + block_layout.label_offset
+                                    + egui::vec2(0.0, 24.0),
+                                egui::Align2::CENTER_TOP,
+                                &block.name,
+                                egui::FontId::proportional(10.0),
+                                egui::Color32::WHITE,
+                            );
                         }
                     }
                 }
@@ -803,6 +1054,30 @@ impl PidView {
         None
     }
 
+    fn hit_test_control_block(
+        &self,
+        system: &tf_project::schema::SystemDef,
+        point: Pos2,
+    ) -> Option<String> {
+        if let Some(ref controls) = system.controls {
+            // Control blocks are drawn as 40x28 rectangles (half_w=20, half_h=14)
+            let half_w = 20.0;
+            let half_h = 14.0;
+            for block in &controls.blocks {
+                if let Some(block_layout) = self.layout.control_blocks.get(&block.id) {
+                    let rect = Rect::from_center_size(
+                        block_layout.pos,
+                        egui::vec2(half_w * 2.0, half_h * 2.0),
+                    );
+                    if rect.contains(point) {
+                        return Some(block.id.clone());
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn hit_test_component(
         &self,
         system: &tf_project::schema::SystemDef,
@@ -944,6 +1219,138 @@ impl PidView {
 
         self.add_component_between_nodes(system, new_kind, &new_node_id, &to_node)
     }
+
+    fn add_control_block(
+        &mut self,
+        system: &mut tf_project::schema::SystemDef,
+        kind: ControlBlockKindChoice,
+        pos: Pos2,
+    ) -> String {
+        // Create the block kind first (before mutable borrow)
+        let block_kind = default_control_block_kind(kind, system);
+
+        // Ensure controls system exists
+        if system.controls.is_none() {
+            system.controls = Some(ControlSystemDef {
+                blocks: Vec::new(),
+                connections: Vec::new(),
+            });
+        }
+
+        let controls = system.controls.as_mut().unwrap();
+        let new_id = next_id("ctrl", controls.blocks.iter().map(|b| &b.id));
+        let name = format!(
+            "{} {}",
+            control_block_kind_label(kind),
+            controls.blocks.len() + 1
+        );
+
+        controls.blocks.push(ControlBlockDef {
+            id: new_id.clone(),
+            name,
+            kind: block_kind,
+        });
+
+        // Add to layout
+        self.layout.ensure_control_block(&new_id, pos);
+
+        new_id
+    }
+
+    fn add_signal_connection(
+        &mut self,
+        system: &mut tf_project::schema::SystemDef,
+        from_block_id: &str,
+        to_block_id: &str,
+        to_input: &str,
+    ) {
+        // Ensure controls system exists
+        if system.controls.is_none() {
+            return;
+        }
+
+        let controls = system.controls.as_mut().unwrap();
+
+        // Check if connection already exists
+        let already_exists = controls.connections.iter().any(|c| {
+            c.from_block_id == from_block_id
+                && c.to_block_id == to_block_id
+                && c.to_input == to_input
+        });
+
+        if already_exists {
+            return; // Don't add duplicate connections
+        }
+
+        // Add the connection to the schema
+        use tf_project::schema::ControlConnectionDef;
+        controls.connections.push(ControlConnectionDef {
+            from_block_id: from_block_id.to_string(),
+            to_block_id: to_block_id.to_string(),
+            to_input: to_input.to_string(),
+        });
+
+        // Add simple routing to layout (straight line for now)
+        let from_pos = self
+            .layout
+            .control_blocks
+            .get(from_block_id)
+            .map(|b| b.pos)
+            .unwrap_or(Pos2::ZERO);
+        let to_pos = self
+            .layout
+            .control_blocks
+            .get(to_block_id)
+            .map(|b| b.pos)
+            .unwrap_or(Pos2::ZERO);
+
+        use crate::pid_editor::PidSignalConnection;
+        self.layout.signal_connections.push(PidSignalConnection {
+            from_block_id: from_block_id.to_string(),
+            to_block_id: to_block_id.to_string(),
+            to_input: to_input.to_string(),
+            points: vec![from_pos, to_pos],
+            label_offset: egui::Vec2::ZERO,
+        });
+    }
+
+    fn delete_control_block(&mut self, system: &mut tf_project::schema::SystemDef, block_id: &str) {
+        if let Some(ref mut controls) = system.controls {
+            // Remove the block itself
+            controls.blocks.retain(|b| b.id != block_id);
+
+            // Remove all connections involving this block
+            controls
+                .connections
+                .retain(|c| c.from_block_id != block_id && c.to_block_id != block_id);
+
+            // Remove from layout
+            self.layout.control_blocks.remove(block_id);
+
+            // Remove signal connections from layout
+            self.layout
+                .signal_connections
+                .retain(|sc| sc.from_block_id != block_id && sc.to_block_id != block_id);
+        }
+    }
+
+    fn delete_signal_connection(
+        &mut self,
+        system: &mut tf_project::schema::SystemDef,
+        index: usize,
+    ) {
+        // Remove from schema
+        if let Some(ref mut controls) = system.controls {
+            if index < controls.connections.len() {
+                controls.connections.remove(index);
+            }
+        }
+
+        // Remove from layout
+        if index < self.layout.signal_connections.len() {
+            self.layout.signal_connections.remove(index);
+        }
+    }
 }
 
 fn pick_record_at_time(records: &[TimeseriesRecord], time_s: f64) -> Option<&TimeseriesRecord> {
@@ -1059,6 +1466,17 @@ fn component_kind_label(kind: ComponentKindChoice) -> &'static str {
     }
 }
 
+fn control_block_kind_label(kind: ControlBlockKindChoice) -> &'static str {
+    match kind {
+        ControlBlockKindChoice::Constant => "Constant",
+        ControlBlockKindChoice::MeasuredVariable => "Measured Var",
+        ControlBlockKindChoice::PIController => "PI Controller",
+        ControlBlockKindChoice::PIDController => "PID Controller",
+        ControlBlockKindChoice::FirstOrderActuator => "Actuator",
+        ControlBlockKindChoice::ActuatorCommand => "Actuator Cmd",
+    }
+}
+
 fn default_component_kind(kind: ComponentKindChoice) -> ComponentKind {
     match kind {
         ComponentKindChoice::Orifice => ComponentKind::Orifice {
@@ -1096,6 +1514,59 @@ fn default_component_kind(kind: ComponentKindChoice) -> ComponentKind {
     }
 }
 
+fn default_control_block_kind(
+    kind: ControlBlockKindChoice,
+    system: &tf_project::schema::SystemDef,
+) -> ControlBlockKindDef {
+    match kind {
+        ControlBlockKindChoice::Constant => ControlBlockKindDef::Constant { value: 0.5 },
+        ControlBlockKindChoice::MeasuredVariable => {
+            // Default to first node's pressure if available
+            let node_id = system
+                .nodes
+                .first()
+                .map(|n| n.id.clone())
+                .unwrap_or_else(|| "n1".to_string());
+            ControlBlockKindDef::MeasuredVariable {
+                reference: MeasuredVariableDef::NodePressure { node_id },
+            }
+        }
+        ControlBlockKindChoice::PIController => ControlBlockKindDef::PIController {
+            kp: 0.1,
+            ti_s: 10.0,
+            out_min: 0.0,
+            out_max: 1.0,
+            integral_limit: Some(10.0),
+            sample_period_s: 0.1,
+        },
+        ControlBlockKindChoice::PIDController => ControlBlockKindDef::PIDController {
+            kp: 0.1,
+            ti_s: 10.0,
+            td_s: 1.0,
+            td_filter_s: 0.1,
+            out_min: 0.0,
+            out_max: 1.0,
+            integral_limit: Some(10.0),
+            sample_period_s: 0.1,
+        },
+        ControlBlockKindChoice::FirstOrderActuator => ControlBlockKindDef::FirstOrderActuator {
+            tau_s: 1.0,
+            rate_limit_per_s: 1.0,
+            initial_position: 0.5,
+        },
+        ControlBlockKindChoice::ActuatorCommand => {
+            // Default to first valve component if available
+            let component_id = system
+                .components
+                .iter()
+                .find(|c| matches!(c.kind, ComponentKind::Valve { .. }))
+                .map(|c| c.id.clone())
+                .unwrap_or_else(|| "c1".to_string());
+            ControlBlockKindDef::ActuatorCommand { component_id }
+        }
+    }
+}
+
 fn next_id<'a, I>(prefix: &str, ids: I) -> String
 where
     I: Iterator<Item = &'a String>,
@@ -1111,4 +1582,33 @@ where
         }
     }
     format!("{}{}", prefix, max + 1)
+}
+fn block_has_output(system: &tf_project::schema::SystemDef, block_id: &str) -> bool {
+    if let Some(ref controls) = system.controls {
+        if let Some(block) = controls.blocks.iter().find(|b| b.id == block_id) {
+            // All blocks except ActuatorCommand have outputs
+            return !matches!(block.kind, ControlBlockKindDef::ActuatorCommand { .. });
+        }
+    }
+    false
+}
+
+fn get_default_input_for_block(
+    system: &tf_project::schema::SystemDef,
+    block_id: &str,
+) -> Option<String> {
+    if let Some(ref controls) = system.controls {
+        if let Some(block) = controls.blocks.iter().find(|b| b.id == block_id) {
+            // Return the default input name for each block type
+            return match &block.kind {
+                ControlBlockKindDef::Constant { .. } => None, // No inputs
+                ControlBlockKindDef::MeasuredVariable { .. } => None, // No inputs
+                ControlBlockKindDef::PIController { .. } => Some("pv".to_string()), // process_value
+                ControlBlockKindDef::PIDController { .. } => Some("pv".to_string()), // process_value
+                ControlBlockKindDef::FirstOrderActuator { .. } => Some("cmd".to_string()), // command
+                ControlBlockKindDef::ActuatorCommand { .. } => Some("pos".to_string()), // position
+            };
+        }
+    }
+    None
 }
