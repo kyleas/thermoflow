@@ -822,6 +822,12 @@ impl eframe::App for ThermoflowApp {
         let inspect_actions = egui::SidePanel::right("inspector")
             .default_width(280.0)
             .show(ctx, |ui| {
+                let active_plot_id = if self.active_view == ViewTab::Plots {
+                    self.plot_view.get_active_plot_id()
+                } else {
+                    None
+                };
+                
                 self.inspect_view.show(
                     ui,
                     &mut self.project,
@@ -830,6 +836,12 @@ impl eframe::App for ThermoflowApp {
                     &self.selected_component_id,
                     &self.selected_control_block_id,
                     &mut self.pid_view,
+                    active_plot_id.as_ref(),
+                    if self.active_view == ViewTab::Plots {
+                        Some(&mut self.plot_view.workspace)
+                    } else {
+                        None
+                    },
                 )
             })
             .inner;

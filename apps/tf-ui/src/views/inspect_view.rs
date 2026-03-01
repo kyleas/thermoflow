@@ -73,10 +73,35 @@ impl InspectView {
         selected_component_id: &Option<String>,
         selected_control_block_id: &Option<String>,
         pid_view: &mut PidView,
+        active_plot_id: Option<&String>,
+        plot_workspace: Option<&mut super::super::plot_workspace::PlotWorkspace>,
     ) -> InspectActions {
         let mut actions = InspectActions::default();
 
         ui.heading("Inspector");
+
+        // Show plot series configuration if viewing plots
+        if let (Some(plot_id), Some(plot_ws)) = (active_plot_id, plot_workspace) {
+            ui.label("📊 Plot Configuration");
+            ui.separator();
+            
+            if let Some(panel) = plot_ws.panels.get_mut(plot_id) {
+                ui.label(format!("Plot: {}", panel.title));
+                ui.separator();
+                
+                ui.label("Series Selection:");
+                ui.separator();
+                
+                egui::ScrollArea::vertical()
+                    .max_height(400.0)
+                    .show(ui, |ui| {
+                        self.show_plot_series_editor(ui, panel);
+                    });
+            }
+            
+            ui.separator();
+            return actions;
+        }
 
         if project.is_none() {
             ui.label("No project loaded");
@@ -1123,6 +1148,80 @@ impl InspectView {
         }
 
         changed
+    }
+
+    fn show_plot_series_editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        panel: &mut super::super::plot_workspace::PlotPanel,
+    ) {
+        let series = &mut panel.series_selection;
+        
+        // Node variables
+        if !series.node_ids_and_variables.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label("Nodes:");
+            });
+            let mut to_remove = Vec::new();
+            for (idx, (node_id, var_name)) in series.node_ids_and_variables.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(format!("  • {} ({})", node_id, var_name));
+                    if ui.button("✕").clicked() {
+                        to_remove.push(idx);
+                    }
+                });
+            }
+            for idx in to_remove.iter().rev() {
+                series.node_ids_and_variables.remove(*idx);
+            }
+            ui.separator();
+        }
+        
+        // Component variables
+        if !series.component_ids_and_variables.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label("Components:");
+            });
+            let mut to_remove = Vec::new();
+            for (idx, (comp_id, var_name)) in series.component_ids_and_variables.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(format!("  • {} ({})", comp_id, var_name));
+                    if ui.button("✕").clicked() {
+                        to_remove.push(idx);
+                    }
+                });
+            }
+            for idx in to_remove.iter().rev() {
+                series.component_ids_and_variables.remove(*idx);
+            }
+            ui.separator();
+        }
+        
+        // Control IDs
+        if !series.control_ids.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label("Controls:");
+            });
+            let mut to_remove = Vec::new();
+            for (idx, ctrl_id) in series.control_ids.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(format!("  • {}", ctrl_id));
+                    if ui.button("✕").clicked() {
+                        to_remove.push(idx);
+                    }
+                });
+            }
+            for idx in to_remove.iter().rev() {
+                series.control_ids.remove(*idx);
+            }
+            ui.separator();
+        }
+        
+        if series.node_ids_and_variables.is_empty() 
+            && series.component_ids_and_variables.is_empty()
+            && series.control_ids.is_empty() {
+            ui.label("(No series selected - drag to configure in P&ID view)");
+        }
     }
 }
 
