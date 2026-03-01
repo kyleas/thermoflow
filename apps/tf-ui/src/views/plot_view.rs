@@ -70,10 +70,13 @@ pub struct PlotView {
     root_container: SplitContainer,
     next_container_id: ContainerId,
     active_container_id: Option<ContainerId>,
+    selected_plot_id: Option<String>, // The plot that drives the inspector panel
     // Drag state
     dragging_panel_id: Option<String>,
     dragging_from_container: Option<ContainerId>,
     drop_target: Option<(ContainerId, DropZone)>,
+    dragging_divider_id: Option<ContainerId>, // For resizing splits
+    divider_ratio_delta: f32, // Track how much the divider has moved
 }
 
 impl Default for PlotView {
@@ -90,9 +93,12 @@ impl Default for PlotView {
             root_container: SplitContainer::new_leaf(0, Vec::new()),
             next_container_id: 1,
             active_container_id: Some(0),
+            selected_plot_id: None,
             dragging_panel_id: None,
             dragging_from_container: None,
             drop_target: None,
+            dragging_divider_id: None,
+            divider_ratio_delta: 0.0,
         }
     }
 }
@@ -123,15 +129,7 @@ impl PlotView {
     /// Get the currently active plot panel ID
     #[allow(dead_code)]
     pub fn get_active_plot_id(&self) -> Option<String> {
-        if let Some(active_id) = self.active_container_id {
-            if let Some(SplitContainer::Leaf { panel_ids, active_tab, .. }) = 
-                Self::find_container_ref(&self.root_container, active_id) {
-                if *active_tab < panel_ids.len() {
-                    return Some(panel_ids[*active_tab].clone());
-                }
-            }
-        }
-        None
+        self.selected_plot_id.clone()
     }
 
     /// Find a container by ID in the tree
@@ -157,6 +155,23 @@ impl PlotView {
 
     /// Apply a drop operation
     fn apply_drop(&mut self, target_container_id: ContainerId, zone: DropZone, panel_id: String) {
+        // Remove panel from source container first
+        if let Some(source_id) = self.dragging_from_container {
+            if source_id != target_container_id {
+                if let Some(container) = Self::find_container_mut(&mut self.root_container, source_id) {
+                    if let SplitContainer::Leaf { panel_ids, active_tab, .. } = container {
+                        if let Some(idx) = panel_ids.iter().position(|id| id == &panel_id) {
+                            panel_ids.remove(idx);
+                            // Adjust active_tab if needed
+                            if *active_tab >= panel_ids.len() && !panel_ids.is_empty() {
+                                *active_tab = panel_ids.len() - 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let new_id = self.next_container_id;
         self.next_container_id += 1;
 
@@ -164,53 +179,117 @@ impl PlotView {
         let new_leaf = SplitContainer::new_leaf(new_id, vec![panel_id]);
 
         // Find and split the target container
-        self.split_container_at(target_container_id, zone, new_leaf);
+        Self::split_container_at(&mut self.root_container, target_container_id, zone, new_leaf, &mut self.next_container_id);
     }
 
-    /// Split a container at the given position
+    /// Recursively split a container at the given position
     fn split_container_at(
-        &mut self,
+        container: &mut SplitContainer,
         target_id: ContainerId,
         zone: DropZone,
         new_container: SplitContainer,
+        next_id: &mut ContainerId,
     ) {
-        // This is complex - we need to replace the target container with a split
-        // For now, let's implement a simpler version that works at the root level
-        if self.root_container.get_id() == target_id {
-            let old_root = std::mem::replace(
-                &mut self.root_container,
+        if container.get_id() == target_id {
+            let old_container = std::mem::replace(
+                container,
                 SplitContainer::new_leaf(0, Vec::new()),
             );
             
-            let split_id = self.next_container_id;
-            self.next_container_id += 1;
+            let split_id = *next_id;
+            *next_id += 1;
 
-            self.root_container = match zone {
+            *container = match zone {
                 DropZone::Left => SplitContainer::HSplit {
                     id: split_id,
                     left: Box::new(new_container),
-                    right: Box::new(old_root),
+                    right: Box::new(old_container),
                     ratio: 0.5,
                 },
                 DropZone::Right => SplitContainer::HSplit {
                     id: split_id,
-                    left: Box::new(old_root),
+                    left: Box::new(old_container),
                     right: Box::new(new_container),
                     ratio: 0.5,
                 },
                 DropZone::Top => SplitContainer::VSplit {
                     id: split_id,
                     top: Box::new(new_container),
-                    bottom: Box::new(old_root),
+                    bottom: Box::new(old_container),
                     ratio: 0.5,
                 },
                 DropZone::Bottom => SplitContainer::VSplit {
                     id: split_id,
-                    top: Box::new(old_root),
+                    top: Box::new(old_container),
                     bottom: Box::new(new_container),
                     ratio: 0.5,
                 },
             };
+            return;
+        }
+
+        // Recursively search in sub-containers
+        match container {
+            SplitContainer::HSplit { left, right, .. } => {
+                if left.get_id() == target_id || Self::contains_id(left, target_id) {
+                    Self::split_container_at(left, target_id, zone, new_container, next_id);
+                } else if right.get_id() == target_id || Self::contains_id(right, target_id) {
+                    Self::split_container_at(right, target_id, zone, new_container, next_id);
+                }
+            }
+            SplitContainer::VSplit { top, bottom, .. } => {
+                if top.get_id() == target_id || Self::contains_id(top, target_id) {
+                    Self::split_container_at(top, target_id, zone, new_container, next_id);
+                } else if bottom.get_id() == target_id || Self::contains_id(bottom, target_id) {
+                    Self::split_container_at(bottom, target_id, zone, new_container, next_id);
+                }
+            }
+            SplitContainer::Leaf { .. } => {}
+        }
+    }
+
+    /// Check if a container subtree contains the target ID
+    fn contains_id(container: &SplitContainer, target_id: ContainerId) -> bool {
+        if container.get_id() == target_id {
+            return true;
+        }
+        match container {
+            SplitContainer::HSplit { left, right, .. } => {
+                Self::contains_id(left, target_id) || Self::contains_id(right, target_id)
+            }
+            SplitContainer::VSplit { top, bottom, .. } => {
+                Self::contains_id(top, target_id) || Self::contains_id(bottom, target_id)
+            }
+            SplitContainer::Leaf { .. } => false,
+        }
+    }
+
+    /// Apply a divider ratio delta to a specific split container
+    fn apply_divider_delta(&mut self, target_id: ContainerId, delta: f32) {
+        Self::apply_divider_delta_recursive(&mut self.root_container, target_id, delta);
+    }
+
+    fn apply_divider_delta_recursive(
+        container: &mut SplitContainer,
+        target_id: ContainerId,
+        delta: f32,
+    ) {
+        match container {
+            SplitContainer::HSplit { id, ratio, left, right } => {
+                if *id == target_id {
+                    *ratio = (*ratio + delta).clamp(0.2, 0.8);
+                }
+                Self::apply_divider_delta_recursive(left, target_id, delta);
+                Self::apply_divider_delta_recursive(right, target_id, delta);
+            }
+            SplitContainer::VSplit { id, ratio, top, bottom } => {
+                if *id == target_id {
+                    *ratio = (*ratio + delta).clamp(0.2, 0.8);
+                }
+                Self::apply_divider_delta_recursive(top, target_id, delta);
+                Self::apply_divider_delta_recursive(bottom, target_id, delta);
+            }
+            SplitContainer::Leaf { .. } => {}
         }
     }
 
@@ -330,9 +409,21 @@ impl PlotView {
 
         // ===== MAIN SPLIT LAYOUT =====
         let available_rect = ui.available_rect_before_wrap();
-        let root_container = self.root_container.clone();
+        let root_container_clone = self.root_container.clone();
         
-        self.render_split_container(ui, &root_container, available_rect);
+        self.render_split_container(ui, &root_container_clone, available_rect);
+        
+        // Apply any pending divider ratio updates
+        if let Some(divider_id) = self.dragging_divider_id {
+            let delta = self.divider_ratio_delta;
+            self.apply_divider_delta(divider_id, delta);
+            
+            // Stop tracking on release
+            if ui.input(|i| i.pointer.any_released()) {
+                self.dragging_divider_id = None;
+                self.divider_ratio_delta = 0.0;
+            }
+        }
 
         // Handle drop if drag released
         if let (Some(dragging_id), Some((target_id, zone))) = 
@@ -357,10 +448,10 @@ impl PlotView {
             SplitContainer::Leaf { id, panel_ids, active_tab } => {
                 self.render_leaf_container(ui, *id, panel_ids, *active_tab, rect);
             }
-            SplitContainer::HSplit { left, right, ratio, .. } => {
+            SplitContainer::HSplit { id, left, right, ratio } => {
                 let split_pos = rect.left() + rect.width() * ratio;
                 
-                let left_rect = egui::Rect::from_min_max(
+                let left_rect =egui::Rect::from_min_max(
                     rect.min,
                     egui::pos2(split_pos - 2.0, rect.max.y),
                 );
@@ -371,19 +462,42 @@ impl PlotView {
 
                 self.render_split_container(ui, left, left_rect);
                 
-                // Draw divider
-                ui.painter().rect_filled(
-                    egui::Rect::from_min_max(
-                        egui::pos2(split_pos - 2.0, rect.min.y),
-                        egui::pos2(split_pos + 2.0, rect.max.y),
-                    ),
-                    0.0,
-                    egui::Color32::from_gray(60),
+                // Draw and handle divider interaction
+                let divider_rect = egui::Rect::from_min_max(
+                    egui::pos2(split_pos - 2.0, rect.min.y),
+                    egui::pos2(split_pos + 2.0, rect.max.y),
                 );
+                
+                let divider_response = ui.interact(
+                    divider_rect,
+                    ui.id().with("divider_h").with(*id),
+                    egui::Sense::drag(),
+                );
+                
+                // Highlight divider on hover
+                let divider_color = if divider_response.hovered() || divider_response.dragged() {
+                    egui::Color32::from_rgb(100, 150, 255)
+                } else {
+                    egui::Color32::from_gray(60)
+                };
+                ui.painter().rect_filled(divider_rect, 0.0, divider_color);
+                
+                // Handle dragging
+                if divider_response.dragged() {
+                    let drag_delta = ui.input(|i| i.pointer.delta()).x;
+                    let new_ratio = (ratio + drag_delta / rect.width()).clamp(0.2, 0.8);
+                    
+                    // Store the update to apply after rendering
+                    if self.dragging_divider_id != Some(*id) {
+                        self.dragging_divider_id = Some(*id);
+                        self.divider_ratio_delta = 0.0;
+                    }
+                    self.divider_ratio_delta = new_ratio - ratio;
+                }
 
                 self.render_split_container(ui, right, right_rect);
             }
-            SplitContainer::VSplit { top, bottom, ratio, .. } => {
+            SplitContainer::VSplit { id, top, bottom, ratio } => {
                 let split_pos = rect.top() + rect.height() * ratio;
                 
                 let top_rect = egui::Rect::from_min_max(
@@ -397,15 +511,38 @@ impl PlotView {
 
                 self.render_split_container(ui, top, top_rect);
                 
-                // Draw divider
-                ui.painter().rect_filled(
-                    egui::Rect::from_min_max(
-                        egui::pos2(rect.min.x, split_pos - 2.0),
-                        egui::pos2(rect.max.x, split_pos + 2.0),
-                    ),
-                    0.0,
-                    egui::Color32::from_gray(60),
+                // Draw and handle divider interaction
+                let divider_rect = egui::Rect::from_min_max(
+                    egui::pos2(rect.min.x, split_pos - 2.0),
+                    egui::pos2(rect.max.x, split_pos + 2.0),
                 );
+                
+                let divider_response = ui.interact(
+                    divider_rect,
+                    ui.id().with("divider_v").with(*id),
+                    egui::Sense::drag(),
+                );
+                
+                // Highlight divider on hover
+                let divider_color = if divider_response.hovered() || divider_response.dragged() {
+                    egui::Color32::from_rgb(100, 150, 255)
+                } else {
+                    egui::Color32::from_gray(60)
+                };
+                ui.painter().rect_filled(divider_rect, 0.0, divider_color);
+                
+                // Handle dragging
+                if divider_response.dragged() {
+                    let drag_delta = ui.input(|i| i.pointer.delta()).y;
+                    let new_ratio = (ratio + drag_delta / rect.height()).clamp(0.2, 0.8);
+                    
+                    // Store the update to apply after rendering
+                    if self.dragging_divider_id != Some(*id) {
+                        self.dragging_divider_id = Some(*id);
+                        self.divider_ratio_delta = 0.0;
+                    }
+                    self.divider_ratio_delta = new_ratio - ratio;
+                }
 
                 self.render_split_container(ui, bottom, bottom_rect);
             }
@@ -447,7 +584,8 @@ impl PlotView {
 
         for (idx, panel_id) in panel_ids.iter().enumerate() {
             if let Some(panel) = self.workspace.panels.get(panel_id) {
-                let is_active = idx == active_tab;
+                // Show as selected only if this plot is the globally selected one
+                let is_selected = self.selected_plot_id.as_ref() == Some(panel_id);
                 let tab_text = format!("📊 {}", panel.title);
                 let tab_width = 120.0;
 
@@ -456,8 +594,8 @@ impl PlotView {
                     egui::pos2(tab_x + tab_width, rect.min.y + tab_height - 2.0),
                 );
 
-                // Tab background
-                let tab_bg = if is_active {
+                // Tab background - only blue for selected plot
+                let tab_bg = if is_selected {
                     egui::Color32::from_rgb(40, 60, 100)
                 } else {
                     egui::Color32::from_gray(35)
@@ -465,7 +603,7 @@ impl PlotView {
                 ui.painter().rect_filled(tab_rect, 2.0, tab_bg);
 
                 // Tab text
-                let text_color = if is_active {
+                let text_color = if is_selected {
                     egui::Color32::from_rgb(100, 180, 255)
                 } else {
                     egui::Color32::LIGHT_GRAY
@@ -488,6 +626,7 @@ impl PlotView {
                 if tab_response.clicked() {
                     new_active_tab = idx;
                     self.active_container_id = Some(container_id);
+                    self.selected_plot_id = Some(panel_id.clone());
                 }
 
                 if tab_response.drag_started() {
