@@ -132,6 +132,7 @@ fn base_project_with_controls() -> Project {
         layouts: vec![],
         runs: RunLibraryDef::default(),
         plotting_workspace: None,
+        fluid_workspace: None,
     }
 }
 

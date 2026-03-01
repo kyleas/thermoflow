@@ -5,6 +5,7 @@
 
 #![allow(dead_code)] // Pre-implemented methods used in future persistence/integration phases
 
+use crate::curve_source::CurveSource;
 use std::collections::HashMap;
 use tf_project::schema::{
     ComponentPlotVariableDef, NodePlotVariableDef, PlotPanelDef, PlotSeriesSelectionDef,
@@ -33,6 +34,8 @@ pub struct PlotSeriesSelection {
     pub node_ids_and_variables: Vec<(String, String)>, // (node_id, variable)
     pub component_ids_and_variables: Vec<(String, String)>, // (component_id, variable)
     pub control_ids: Vec<String>,
+    /// Arbitrary curve sources (valve characteristics, actuator responses, etc.)
+    pub arbitrary_curves: Vec<CurveSource>,
 }
 
 /// Runtime representation of a plot template.
@@ -298,6 +301,11 @@ impl PlotSeriesSelection {
                 .map(|cv| (cv.component_id.clone(), cv.variable.clone()))
                 .collect(),
             control_ids: def.control_ids.clone(),
+            arbitrary_curves: def
+                .arbitrary_curves
+                .iter()
+                .map(Self::curve_from_def)
+                .collect(),
         }
     }
 
@@ -320,6 +328,111 @@ impl PlotSeriesSelection {
                 })
                 .collect(),
             control_ids: self.control_ids.clone(),
+            arbitrary_curves: self
+                .arbitrary_curves
+                .iter()
+                .map(Self::curve_to_def)
+                .collect(),
+        }
+    }
+
+    /// Convert from schema definition to runtime curve source.
+    fn curve_from_def(def: &tf_project::schema::ArbitraryCurveSourceDef) -> CurveSource {
+        use crate::curve_source::{FluidSweepParameters, ValveCharacteristicKind};
+        use tf_project::schema::{ArbitraryCurveSourceDef, ValveCharacteristicKindDef};
+
+        match def {
+            ArbitraryCurveSourceDef::ValveCharacteristic {
+                component_id,
+                characteristic,
+                sample_count,
+            } => CurveSource::ValveCharacteristic {
+                component_id: component_id.clone(),
+                characteristic: match characteristic {
+                    ValveCharacteristicKindDef::EffectiveArea => {
+                        ValveCharacteristicKind::EffectiveArea
+                    }
+                    ValveCharacteristicKindDef::OpeningFactor => {
+                        ValveCharacteristicKind::OpeningFactor
+                    }
+                },
+                sample_count: *sample_count,
+            },
+            ArbitraryCurveSourceDef::ActuatorResponse {
+                tau_s,
+                rate_limit_per_s,
+                initial_position,
+                command,
+                duration_s,
+                sample_count,
+            } => CurveSource::ActuatorResponse {
+                tau_s: *tau_s,
+                rate_limit_per_s: *rate_limit_per_s,
+                initial_position: *initial_position,
+                command: *command,
+                duration_s: *duration_s,
+                sample_count: *sample_count,
+            },
+            ArbitraryCurveSourceDef::FluidPropertySweep {
+                x_property,
+                y_property,
+                parameters: _,
+            } => CurveSource::FluidPropertySweep {
+                x_property: x_property.clone(),
+                y_property: y_property.clone(),
+                parameters: FluidSweepParameters::default(),
+            },
+        }
+    }
+
+    /// Convert from runtime curve source to schema definition.
+    fn curve_to_def(source: &CurveSource) -> tf_project::schema::ArbitraryCurveSourceDef {
+        use crate::curve_source::ValveCharacteristicKind;
+        use tf_project::schema::{
+            ArbitraryCurveSourceDef, FluidSweepParametersDef, ValveCharacteristicKindDef,
+        };
+
+        match source {
+            CurveSource::ValveCharacteristic {
+                component_id,
+                characteristic,
+                sample_count,
+            } => ArbitraryCurveSourceDef::ValveCharacteristic {
+                component_id: component_id.clone(),
+                characteristic: match characteristic {
+                    ValveCharacteristicKind::EffectiveArea => {
+                        ValveCharacteristicKindDef::EffectiveArea
+                    }
+                    ValveCharacteristicKind::OpeningFactor => {
+                        ValveCharacteristicKindDef::OpeningFactor
+                    }
+                },
+                sample_count: *sample_count,
+            },
+            CurveSource::ActuatorResponse {
+                tau_s,
+                rate_limit_per_s,
+                initial_position,
+                command,
+                duration_s,
+                sample_count,
+            } => ArbitraryCurveSourceDef::ActuatorResponse {
+                tau_s: *tau_s,
+                rate_limit_per_s: *rate_limit_per_s,
+                initial_position: *initial_position,
+                command: *command,
+                duration_s: *duration_s,
+                sample_count: *sample_count,
+            },
+            CurveSource::FluidPropertySweep {
+                x_property,
+                y_property,
+                parameters: _,
+            } => ArbitraryCurveSourceDef::FluidPropertySweep {
+                x_property: x_property.clone(),
+                y_property: y_property.clone(),
+                parameters: FluidSweepParametersDef::default(),
+            },
         }
     }
 
@@ -654,5 +767,113 @@ mod tests {
         // Panels should cascade (y increase with each new panel)
         assert!(panel1.y < panel2.y);
         assert!(panel2.y < panel3.y);
+    }
+
+    #[test]
+    fn test_arbitrary_curves_persistence() {
+        use crate::curve_source::{CurveSource, ValveCharacteristicKind};
+
+        let mut selection = PlotSeriesSelection::default();
+
+        // Add valve characteristic curve
+        selection
+            .arbitrary_curves
+            .push(CurveSource::ValveCharacteristic {
+                component_id: "valve1".to_string(),
+                characteristic: ValveCharacteristicKind::EffectiveArea,
+                sample_count: 100,
+            });
+
+        // Add actuator response curve
+        selection
+            .arbitrary_curves
+            .push(CurveSource::ActuatorResponse {
+                tau_s: 1.5,
+                rate_limit_per_s: 2.0,
+                initial_position: 0.0,
+                command: 1.0,
+                duration_s: 5.0,
+                sample_count: 150,
+            });
+
+        // Convert to def and back
+        let def = selection.to_def();
+        let selection2 = PlotSeriesSelection::from_def(&def);
+
+        // Verify round-trip
+        assert_eq!(selection2.arbitrary_curves.len(), 2);
+
+        // Check first curve (valve)
+        match &selection2.arbitrary_curves[0] {
+            CurveSource::ValveCharacteristic {
+                component_id,
+                characteristic,
+                sample_count,
+            } => {
+                assert_eq!(component_id, "valve1");
+                assert_eq!(*characteristic, ValveCharacteristicKind::EffectiveArea);
+                assert_eq!(*sample_count, 100);
+            }
+            _ => panic!("Expected ValveCharacteristic"),
+        }
+
+        // Check second curve (actuator)
+        match &selection2.arbitrary_curves[1] {
+            CurveSource::ActuatorResponse {
+                tau_s,
+                rate_limit_per_s,
+                command,
+                duration_s,
+                sample_count,
+                ..
+            } => {
+                assert_eq!(*tau_s, 1.5);
+                assert_eq!(*rate_limit_per_s, 2.0);
+                assert_eq!(*command, 1.0);
+                assert_eq!(*duration_s, 5.0);
+                assert_eq!(*sample_count, 150);
+            }
+            _ => panic!("Expected ActuatorResponse"),
+        }
+    }
+
+    #[test]
+    fn test_workspace_with_arbitrary_curves_persistence() {
+        use crate::curve_source::{CurveSource, ValveCharacteristicKind};
+
+        let mut workspace1 = PlotWorkspace::new();
+        let panel_id = workspace1.create_panel("Plot with curves".to_string(), None);
+
+        // Add arbitrary curves to the panel
+        if let Some(panel) = workspace1.panels.get_mut(&panel_id) {
+            panel
+                .series_selection
+                .arbitrary_curves
+                .push(CurveSource::ValveCharacteristic {
+                    component_id: "valve1".to_string(),
+                    characteristic: ValveCharacteristicKind::OpeningFactor,
+                    sample_count: 50,
+                });
+            panel
+                .series_selection
+                .arbitrary_curves
+                .push(CurveSource::ActuatorResponse {
+                    tau_s: 0.5,
+                    rate_limit_per_s: 1.0,
+                    initial_position: 0.5,
+                    command: 0.0,
+                    duration_s: 3.0,
+                    sample_count: 75,
+                });
+        }
+
+        // Export to definition and re-import
+        let def = workspace1.to_def();
+        let workspace2 = PlotWorkspace::from_def(&def);
+
+        // Verify arbitrary curves persisted
+        assert_eq!(workspace2.panels.len(), 1);
+        let restored_panel = workspace2.panels.values().next().unwrap();
+        assert_eq!(restored_panel.series_selection.arbitrary_curves.len(), 2);
     }
 }

@@ -137,6 +137,18 @@ Thermoflow evolves in seven phases, each building on the previous to add capabil
 
 **Objective**: Standalone fluid property exploration; replace RefProp GUI for quick calculations.
 
+**Status update (2026-02-28)**:
+- ✅ MVP delivered: single-state calculator workspace with project persistence
+- 🔄 Remaining for full phase: sweeps, property plotting, state-point library/history
+
+**MVP delivered**:
+- Dedicated Fluid workspace in GUI
+- Species selection using supported backend species
+- Input-pair selection (`P-T`, `P-h`, `rho-h`, `P-s`)
+- Single equilibrium state compute
+- Full property table (`P`, `T`, `rho`, `h`, `s`, `cp`, `cv`, `gamma`, `a`, phase/quality when available)
+- Workspace state persisted in project file (`fluid_workspace`)
+
 **Key Deliverables**:
 - Fluid property browser (searchable data table for P, T, ρ, h, s, μ, k, etc.)
 - Property-vs-property 2D plots (T-s, P-h, Mollier, etc.)

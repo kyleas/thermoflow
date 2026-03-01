@@ -16,6 +16,8 @@ pub struct Project {
     pub runs: RunLibraryDef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plotting_workspace: Option<PlottingWorkspaceDef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fluid_workspace: Option<FluidWorkspaceDef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -454,6 +456,107 @@ pub struct PlotPanelDef {
     pub series_selection: PlotSeriesSelectionDef,
 }
 
+/// Generic arbitrary curve source  (valve characteristics, actuator responses, fluid property sweeps).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum ArbitraryCurveSourceDef {
+    ValveCharacteristic {
+        component_id: String,
+        characteristic: ValveCharacteristicKindDef,
+        #[serde(default = "default_curve_sample_count")]
+        sample_count: usize,
+    },
+    ActuatorResponse {
+        tau_s: f64,
+        rate_limit_per_s: f64,
+        #[serde(default)]
+        initial_position: f64,
+        #[serde(default = "default_step_command")]
+        command: f64,
+        #[serde(default = "default_response_duration")]
+        duration_s: f64,
+        #[serde(default = "default_curve_sample_count")]
+        sample_count: usize,
+    },
+    FluidPropertySweep {
+        x_property: String,
+        y_property: String,
+        parameters: FluidSweepParametersDef,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ValveCharacteristicKindDef {
+    EffectiveArea,
+    OpeningFactor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FluidSweepParametersDef {
+    /// Independent variable being swept (e.g., "Temperature", "Pressure")
+    pub sweep_variable: String,
+    /// Start value with unit (e.g., "300K", "1bar")
+    pub start_value: String,
+    /// End value with unit (e.g., "400K", "10bar")
+    pub end_value: String,
+    /// Number of points to generate in the sweep
+    #[serde(default = "default_sweep_points")]
+    pub num_points: usize,
+    /// Spacing type: "Linear" or "Logarithmic"
+    #[serde(default = "default_sweep_type")]
+    pub sweep_type: String,
+    /// Fixed fluid species for the sweep (e.g., "N2", "H2O")
+    pub species: String,
+    /// Secondary fixed property (e.g., if sweeping temperature, might fix pressure)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_property: Option<FixedPropertyDef>,
+}
+
+impl Default for FluidSweepParametersDef {
+    fn default() -> Self {
+        Self {
+            sweep_variable: "Temperature".to_string(),
+            start_value: "300K".to_string(),
+            end_value: "400K".to_string(),
+            num_points: default_sweep_points(),
+            sweep_type: default_sweep_type(),
+            species: "N2".to_string(),
+            fixed_property: Some(FixedPropertyDef {
+                property_name: "Pressure".to_string(),
+                value: "101325Pa".to_string(),
+            }),
+        }
+    }
+}
+
+/// Fixed property definition for sweeps.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FixedPropertyDef {    /// Property name (e.g., "Pressure", "Temperature")
+    pub property_name: String,
+    /// Value with unit (e.g., "101325Pa", "300K")
+    pub value: String,
+}
+
+fn default_sweep_points() -> usize {
+    50
+}
+
+fn default_sweep_type() -> String {
+    "Linear".to_string()
+}
+
+fn default_curve_sample_count() -> usize {
+    100
+}
+
+fn default_step_command() -> f64 {
+    1.0
+}
+
+fn default_response_duration() -> f64 {
+    5.0
+}
+
 /// Specifies which series are shown in a plot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct PlotSeriesSelectionDef {
@@ -463,6 +566,9 @@ pub struct PlotSeriesSelectionDef {
     pub component_ids_and_variables: Vec<ComponentPlotVariableDef>,
     #[serde(default)]
     pub control_ids: Vec<String>,
+    /// Arbitrary curve sources (valve characteristics, actuator responses, etc.)
+    #[serde(default)]
+    pub arbitrary_curves: Vec<ArbitraryCurveSourceDef>,
 }
 
 /// A node series to plot.
@@ -497,4 +603,60 @@ pub struct PlotTemplateDef {
     /// Default height for plots created from this template
     #[serde(default)]
     pub default_height: f32,
+}
+
+/// Persistent fluid workspace configuration for multi-column fluid comparison and analysis.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FluidWorkspaceDef {
+    /// Collection of fluid cases for comparison
+    #[serde(default)]
+    pub cases: Vec<FluidCaseDef>,
+}
+
+impl Default for FluidWorkspaceDef {
+    fn default() -> Self {
+        Self {
+            cases: vec![FluidCaseDef::default()],
+        }
+    }
+}
+
+/// Single fluid case definition.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FluidCaseDef {
+    /// Unique identifier for this case
+    pub id: String,
+    /// Selected fluid species key (e.g. "N2", "H2O").
+    pub species: String,
+    /// Selected input pair.
+    pub input_pair: FluidInputPairDef,
+    /// First input value (meaning depends on pair).
+    pub input_1: f64,
+    /// Second input value (meaning depends on pair).
+    pub input_2: f64,
+    /// Optional quality for two-phase disambiguation (0.0 = sat. liquid, 1.0 = sat. vapor)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<f64>,
+}
+
+impl Default for FluidCaseDef {
+    fn default() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            species: "N2".to_string(),
+            input_pair: FluidInputPairDef::PT,
+            input_1: 101_325.0,
+            input_2: 300.0,
+            quality: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum FluidInputPairDef {
+    #[default]
+    PT,
+    PH,
+    RhoH,
+    PS,
 }

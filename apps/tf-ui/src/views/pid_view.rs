@@ -27,11 +27,7 @@ pub struct PidView {
     // Store per-node overlay settings
     node_overlays: HashMap<String, NodeOverlayDef>,
     editor: PidEditorState,
-    add_component_kind: ComponentKindChoice,
-    pending_component_kind: Option<ComponentKindChoice>,
     pending_from_node: Option<String>,
-    add_control_block_kind: ControlBlockKindChoice,
-    pending_control_block_kind: Option<ControlBlockKindChoice>,
     pending_signal_from_block: Option<String>,
     pending_signal_to_input: Option<String>,
     selected_control_block_id: Option<String>,
@@ -68,11 +64,7 @@ impl Default for PidView {
             layout: PidLayout::default(),
             node_overlays: HashMap::new(),
             editor: PidEditorState::default(),
-            add_component_kind: ComponentKindChoice::default(),
-            pending_component_kind: None,
             pending_from_node: None,
-            add_control_block_kind: ControlBlockKindChoice::default(),
-            pending_control_block_kind: None,
             pending_signal_from_block: None,
             pending_signal_to_input: None,
             selected_control_block_id: None,
@@ -108,9 +100,7 @@ impl PidView {
         self.layout = PidLayout::default();
         self.node_overlays.clear();
         self.editor = PidEditorState::default();
-        self.pending_component_kind = None;
         self.pending_from_node = None;
-        self.pending_control_block_kind = None;
         self.pending_signal_from_block = None;
         self.pending_signal_to_input = None;
         self.selected_control_block_id = None;
@@ -512,15 +502,15 @@ impl PidView {
                         request_redo = true;
                     }
                     ui.separator();
-                    if ui.button("Auto-route").clicked() {
+                    if ui.button("Auto-route").on_hover_text("Refresh routing for all components").clicked() {
                         self.autoroute_all(system);
                         should_save_layout = true;
                     }
-                    if ui.button("Snap to grid").clicked() {
+                    if ui.button("Snap to grid").on_hover_text("Align all nodes to grid").clicked() {
                         self.snap_all_nodes();
                         should_save_layout = true;
                     }
-                    if ui.button("Frame all").clicked() {
+                    if ui.button("Frame all").on_hover_text("Zoom and pan to fit all elements").clicked() {
                         // Frame all will be applied to the current canvas rect
                         // during drawing, so just set a flag here
                         self.camera_frame_just_loaded = true;
@@ -528,89 +518,30 @@ impl PidView {
                     ui.checkbox(&mut self.grid_enabled, "Grid");
                     ui.checkbox(&mut self.hide_junction_names, "Hide junction names");
                     ui.separator();
-                    if ui.button("📋 Quick Add").clicked() {
+                    if ui.button("📋 Quick Add").on_hover_text("Add nodes, components, or control blocks").clicked() {
                         self.insertion_palette_active = !self.insertion_palette_active;
                         self.insertion_palette_search.clear();
                     }
-                    if self.pending_insertion_kind.is_some() {
-                        ui.label("Inserting... (click canvas to place)");
+                    if let Some(kind) = &self.pending_insertion_kind {
+                        match kind {
+                            PaletteItemKind::FluidComponent(_) => {
+                                if self.pending_from_node.is_some() {
+                                    ui.label("Component: Select second node (or click same node to reset)");
+                                } else {
+                                    ui.label("Component: Click first node");
+                                }
+                            }
+                            PaletteItemKind::ControlBlock(_) => {
+                                ui.label("Block: Click canvas to place");
+                            }
+                            PaletteItemKind::Node(_) => {
+                                ui.label("Node: Click canvas to place");
+                            }
+                        }
                         if ui.button("Cancel").clicked() {
                             self.pending_insertion_kind = None;
+                            self.pending_from_node = None;
                         }
-                    }
-                    ui.separator();
-                    ui.label("Add component:");
-                    egui::ComboBox::from_id_salt("pid_add_component")
-                        .selected_text(component_kind_label(self.add_component_kind))
-                        .show_ui(ui, |ui| {
-                            for kind in [
-                                ComponentKindChoice::Orifice,
-                                ComponentKindChoice::Valve,
-                                ComponentKindChoice::Pipe,
-                                ComponentKindChoice::Pump,
-                                ComponentKindChoice::Turbine,
-                            ] {
-                                ui.selectable_value(
-                                    &mut self.add_component_kind,
-                                    kind,
-                                    component_kind_label(kind),
-                                );
-                            }
-                        });
-                    if ui.button("Pick endpoints").clicked() {
-                        self.pending_component_kind = Some(self.add_component_kind);
-                        self.pending_from_node = None;
-                        self.editor.selection.clear();
-                    }
-                    if let Some(kind) = self.pending_component_kind {
-                        ui.label(format!("Pick 2 nodes ({})", component_kind_label(kind)));
-                    }
-                    if let Some(comp_id) = self.selected_component() {
-                        if ui.button("Insert component").clicked() {
-                            if let Some(new_id) = self.insert_component_on_edge(
-                                system,
-                                &comp_id,
-                                self.add_component_kind,
-                            ) {
-                                self.editor.selection.clear();
-                                self.editor.selection.add_component(new_id);
-                                should_save_layout = true;
-                            }
-                        }
-                    }
-                });
-
-                // Control block insertion toolbar
-                ui.horizontal(|ui| {
-                    ui.separator();
-                    ui.label("Add control block:");
-                    egui::ComboBox::from_id_salt("pid_add_control_block")
-                        .selected_text(control_block_kind_label(self.add_control_block_kind))
-                        .show_ui(ui, |ui| {
-                            for kind in [
-                                ControlBlockKindChoice::Constant,
-                                ControlBlockKindChoice::MeasuredVariable,
-                                ControlBlockKindChoice::PIController,
-                                ControlBlockKindChoice::PIDController,
-                                ControlBlockKindChoice::FirstOrderActuator,
-                                ControlBlockKindChoice::ActuatorCommand,
-                            ] {
-                                ui.selectable_value(
-                                    &mut self.add_control_block_kind,
-                                    kind,
-                                    control_block_kind_label(kind),
-                                );
-                            }
-                        });
-                    if ui.button("Place block").clicked() {
-                        self.pending_control_block_kind = Some(self.add_control_block_kind);
-                        self.editor.selection.clear();
-                    }
-                    if let Some(kind) = self.pending_control_block_kind {
-                        ui.label(format!(
-                            "Click to place ({})",
-                            control_block_kind_label(kind)
-                        ));
                     }
                 });
 
@@ -1203,7 +1134,10 @@ impl PidView {
                                     // For components, we follow the two-click model
                                     if let Some(node_id) = self.hit_test_node(system, click_pos) {
                                         if let Some(from_id) = self.pending_from_node.clone() {
-                                            if from_id != node_id {
+                                            if from_id == node_id {
+                                                // User clicked the same node twice - reset to start over
+                                                self.pending_from_node = None;
+                                            } else {
                                                 let new_id = self.add_component_between_nodes(
                                                     system, comp_kind, &from_id, &node_id,
                                                 );
@@ -1237,20 +1171,6 @@ impl PidView {
                                     should_save_layout = true;
                                 }
                             }
-                        } else if let Some(kind) = self.pending_control_block_kind {
-                            // Place control block at click position
-                            let snapped_pos = if self.grid_enabled {
-                                snap_to_grid(click_pos)
-                            } else {
-                                click_pos
-                            };
-                            let new_block_id = self.add_control_block(system, kind, snapped_pos);
-                            self.pending_control_block_kind = None;
-                            if !shift_pressed {
-                                self.editor.selection.clear();
-                            }
-                            self.editor.selection.add_control_block(new_block_id);
-                            should_save_layout = true;
                         } else if let Some(block_id) =
                             self.hit_test_control_block(system, click_pos)
                         {
@@ -1305,30 +1225,11 @@ impl PidView {
                                     None
                                 };
                         } else if let Some(node_id) = self.hit_test_node(system, click_pos) {
-                            if let Some(kind) = self.pending_component_kind {
-                                if let Some(from_id) = self.pending_from_node.clone() {
-                                    if from_id != node_id {
-                                        let new_id = self.add_component_between_nodes(
-                                            system, kind, &from_id, &node_id,
-                                        );
-                                        self.pending_component_kind = None;
-                                        self.pending_from_node = None;
-                                        self.editor.selection.clear();
-                                        if let Some(new_component_id) = new_id {
-                                            self.editor.selection.add_component(new_component_id);
-                                        }
-                                        should_save_layout = true;
-                                    }
-                                } else {
-                                    self.pending_from_node = Some(node_id.clone());
-                                }
+                            if shift_pressed {
+                                self.editor.selection.toggle_node(node_id);
                             } else {
-                                if shift_pressed {
-                                    self.editor.selection.toggle_node(node_id);
-                                } else {
-                                    self.editor.selection.clear();
-                                    self.editor.selection.add_node(node_id);
-                                }
+                                self.editor.selection.clear();
+                                self.editor.selection.add_node(node_id);
                             }
                         } else if let Some(comp_id) = self.hit_test_edge(system, click_pos) {
                             if shift_pressed {
@@ -1445,7 +1346,10 @@ impl PidView {
                             .map(|box_sel| box_sel.rect().contains(node_layout.pos))
                             .unwrap_or(false);
                         let selected = self.editor.selection.contains_node(&node.id) || box_hovered;
-                        let color = if selected {
+                        let is_first_endpoint = self.pending_from_node.as_ref() == Some(&node.id);
+                        let color = if is_first_endpoint {
+                            egui::Color32::from_rgb(255, 165, 0) // Orange for first endpoint
+                        } else if selected {
                             egui::Color32::YELLOW
                         } else {
                             egui::Color32::LIGHT_BLUE
@@ -2138,6 +2042,7 @@ impl PidView {
         Some(new_id)
     }
 
+    #[allow(dead_code)]
     fn insert_component_on_edge(
         &mut self,
         system: &mut tf_project::schema::SystemDef,
@@ -2527,6 +2432,7 @@ impl PidView {
                 for (label, kind) in &filtered {
                     if ui.button(label).clicked() {
                         self.pending_insertion_kind = Some(kind.clone());
+                        self.pending_from_node = None;
                     }
                 }
 
@@ -2655,16 +2561,6 @@ fn offset_port(from: Pos2, to: Pos2, offset: f32) -> Pos2 {
         Pos2::new(from.x + offset * dx.signum(), from.y)
     } else {
         Pos2::new(from.x, from.y + offset * dy.signum())
-    }
-}
-
-fn component_kind_label(kind: ComponentKindChoice) -> &'static str {
-    match kind {
-        ComponentKindChoice::Orifice => "Orifice",
-        ComponentKindChoice::Valve => "Valve",
-        ComponentKindChoice::Pipe => "Pipe",
-        ComponentKindChoice::Pump => "Pump",
-        ComponentKindChoice::Turbine => "Turbine",
     }
 }
 

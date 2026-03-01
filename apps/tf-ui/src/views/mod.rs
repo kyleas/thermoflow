@@ -1,9 +1,11 @@
+pub mod fluid_view;
 pub mod inspect_view;
 pub mod module_view;
 pub mod pid_view;
 pub mod plot_view;
 pub mod run_view;
 
+pub use fluid_view::FluidView;
 pub use inspect_view::{
     ComponentKindChoice, ControlBlockKindChoice, InspectActions, InspectView, NewComponentSpec,
     NodeKindChoice,

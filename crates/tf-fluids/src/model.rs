@@ -2,7 +2,7 @@
 
 use crate::composition::Composition;
 use crate::error::{FluidError, FluidResult};
-use crate::state::{SpecEnthalpy, SpecHeatCapacity, StateInput, ThermoState};
+use crate::state::{SpecEnthalpy, SpecEntropy, SpecHeatCapacity, StateInput, ThermoState};
 use tf_core::units::{Density, Pressure, Temperature, Velocity};
 
 /// Cached thermodynamic properties from a single state.
@@ -98,8 +98,25 @@ pub trait FluidModel: Send + Sync {
     /// Compute specific enthalpy [J/kg] at the given state.
     fn h(&self, state: &ThermoState) -> FluidResult<SpecEnthalpy>;
 
+    /// Compute specific entropy [J/(kg·K)] at the given state.
+    fn s(&self, state: &ThermoState) -> FluidResult<SpecEntropy>;
+
     /// Compute specific heat capacity at constant pressure [J/(kg·K)] at the given state.
     fn cp(&self, state: &ThermoState) -> FluidResult<SpecHeatCapacity>;
+
+    /// Compute specific heat capacity at constant volume [J/(kg·K)] at the given state.
+    fn cv(&self, state: &ThermoState) -> FluidResult<SpecHeatCapacity> {
+        let cp = self.cp(state)?;
+        let gamma = self.gamma(state)?;
+        if !gamma.is_finite() || gamma <= 0.0 {
+            return Err(FluidError::NonPhysical {
+                what: "gamma must be positive and finite",
+            });
+        }
+        let cv = cp / gamma;
+        validation::validate_cp(cv)?;
+        Ok(cv)
+    }
 
     /// Compute heat capacity ratio γ = cp/cv (dimensionless) at the given state.
     fn gamma(&self, state: &ThermoState) -> FluidResult<f64>;

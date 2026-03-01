@@ -24,6 +24,10 @@ pub enum StateInput {
     PT { p: Pressure, t: Temperature },
     /// Pressure and specific enthalpy.
     PH { p: Pressure, h: SpecEnthalpy },
+    /// Density and specific enthalpy.
+    RhoH { rho_kg_m3: f64, h: SpecEnthalpy },
+    /// Pressure and specific entropy.
+    PS { p: Pressure, s: SpecEntropy },
 }
 
 /// Thermodynamic state: pressure, temperature, and composition.

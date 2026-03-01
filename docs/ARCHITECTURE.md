@@ -74,21 +74,21 @@ Within that project, users switch between **workspaces**—specialized UI views�
 
 ### 3.2 Fluid Workspace
 
-**Purpose**: Explore thermodynamic and transport properties; create and visualize state points.
+**Purpose**: Compute and inspect single-point equilibrium fluid states using canonical backend services.
 
-**User activities**:
-- Search/filter fluid properties in a data table (P, T, ρ, h, s, μ, k, etc.)
-- Create property-vs-property plots (T-s, P-h, etc.)
-- Mark and save "interesting" state points (useful reference states)
-- View saturation boundaries and phase diagrams
-- Solve for state given pairs of independent properties (e.g., P+T, P+h)
+**User activities (MVP)**:
+- Select a supported species/fluid
+- Select input pair (`P-T`, `P-h`, `rho-h`, `P-s`)
+- Enter two inputs and compute one equilibrium state
+- Inspect full property table (`P`, `T`, `rho`, `h`, `s`, `cp`, `cv`, `gamma`, `a`, phase/quality when available)
+- Persist workspace selection and inputs with the project
 
-**Key capabilities**:
-- Fluid property calculator (RefProp-compatible interface)
-- Property database browser
-- Multi-fluid support (N₂, O₂, H₂, CH₄, CO₂, H₂O, mixtures, etc.)
-- 2D/3D property plots with saved viewpoints
-- State point tables and history
+**Key capabilities (MVP)**:
+- RefProp-like single-state calculator UI
+- Canonical backend-first state computation in `tf-fluids`
+- Explicit supported input-pair model
+- Project-level persistence for fluid workspace state
+- Extensible foundation for later sweeps/plots
 
 **Backend services**:
 - tf-fluids (thermodynamic models, RefProp wrapper)
@@ -99,6 +99,11 @@ Within that project, users switch between **workspaces**—specialized UI views�
 - Thermodynamic calculation engine (use tf-fluids)
 - System simulation (use System workspace)
 - Cycle design logic (use Cycle workspace)
+
+**Planned post-MVP**:
+- Property sweeps and property-vs-property plotting
+- Saved state-point libraries/history
+- Additional phase/saturation visual tools
 
 ### 3.3 Cycle Workspace
 

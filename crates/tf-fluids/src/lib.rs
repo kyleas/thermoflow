@@ -34,6 +34,8 @@
 //! println!("Density: {} kg/m³", rho.value);
 //! ```
 
+pub mod calculator;
+pub mod catalog;
 pub mod composition;
 pub mod coolprop;
 pub mod error;
@@ -41,8 +43,15 @@ pub mod model;
 pub mod species;
 pub mod state;
 pub mod surrogate;
+pub mod sweep_executor;
+pub mod sweeps;
+pub mod units;
 
 // Re-exports for ergonomics
+pub use calculator::{EquilibriumState, FluidInputPair, compute_equilibrium_state};
+pub use catalog::{
+    FluidCatalogEntry, filter_practical_coolprop_catalog, practical_coolprop_catalog,
+};
 pub use composition::Composition;
 pub use coolprop::CoolPropModel;
 pub use error::{FluidError, FluidResult};
@@ -50,3 +59,9 @@ pub use model::{FluidModel, ThermoPropertyPack};
 pub use species::Species;
 pub use state::{SpecEnthalpy, SpecEntropy, SpecHeatCapacity, StateInput, ThermoState};
 pub use surrogate::FrozenPropertySurrogate;
+pub use sweep_executor::{
+    SweepError, SweepResult, execute_generic_sweep, execute_pressure_sweep_at_temperature,
+    execute_temperature_sweep_at_pressure,
+};
+pub use sweeps::{SweepDefinition, SweepType};
+pub use units::{parse_quantity, Quantity, UnitError, UnitValue};

@@ -265,18 +265,8 @@ pub fn parse_boundaries_with_atmosphere(
 }
 
 fn parse_species(name: &str) -> AppResult<Species> {
-    match name.to_uppercase().as_str() {
-        "N2" | "NITROGEN" => Ok(Species::N2),
-        "O2" | "OXYGEN" => Ok(Species::O2),
-        "H2" | "HYDROGEN" => Ok(Species::H2),
-        "HE" | "HELIUM" => Ok(Species::He),
-        "AR" | "ARGON" => Ok(Species::Ar),
-        "CH4" | "METHANE" => Ok(Species::CH4),
-        "CO2" => Ok(Species::CO2),
-        "CO" => Ok(Species::CO),
-        "H2O" | "WATER" => Ok(Species::H2O),
-        _ => Err(AppError::Compile(format!("Unknown species: {}", name))),
-    }
+    name.parse::<Species>()
+        .map_err(|_| AppError::Compile(format!("Unknown species: {}", name)))
 }
 
 fn area(value: f64) -> Area {

@@ -57,6 +57,7 @@ fn atmosphere_node_validates() {
         layouts: vec![],
         runs: RunLibraryDef::default(),
         plotting_workspace: None,
+        fluid_workspace: None,
     };
 
     validate_project(&project).expect("Atmosphere project should validate");
@@ -80,6 +81,7 @@ fn atmosphere_invalid_pressure_fails() {
         layouts: vec![],
         runs: RunLibraryDef::default(),
         plotting_workspace: None,
+        fluid_workspace: None,
     };
 
     assert!(validate_project(&project).is_err());
@@ -103,6 +105,7 @@ fn atmosphere_boundary_rejected() {
         layouts: vec![],
         runs: RunLibraryDef::default(),
         plotting_workspace: None,
+        fluid_workspace: None,
     };
 
     assert!(validate_project(&project).is_err());
@@ -131,6 +134,7 @@ fn atmosphere_schedule_rejected() {
         layouts: vec![],
         runs: RunLibraryDef::default(),
         plotting_workspace: None,
+        fluid_workspace: None,
     };
 
     assert!(validate_project(&project).is_err());

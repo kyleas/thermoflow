@@ -12,7 +12,8 @@
 use tf_components::ValveLaw;
 use tf_core::units::{Density, Temperature, Velocity, k, m, pa};
 use tf_fluids::{
-    Composition, FluidModel, SpecEnthalpy, SpecHeatCapacity, Species, StateInput, ThermoState,
+    Composition, FluidModel, SpecEnthalpy, SpecEntropy, SpecHeatCapacity, Species, StateInput,
+    ThermoState,
 };
 use tf_graph::GraphBuilder;
 use tf_sim::{
@@ -55,6 +56,23 @@ impl FluidModel for SimpleIdealGasModel {
                     Temperature::new::<uom::si::thermodynamic_temperature::kelvin>(t_val),
                 )
             }
+            StateInput::RhoH { rho_kg_m3, h } => {
+                let t_val = (h / self.cp).max(1.0);
+                let p_val = rho_kg_m3 * self.r * t_val;
+                (
+                    pa(p_val),
+                    Temperature::new::<uom::si::thermodynamic_temperature::kelvin>(t_val),
+                )
+            }
+            StateInput::PS { p, s } => {
+                let p0 = 101_325.0;
+                let t0 = 300.0;
+                let t_val = t0 * ((s + self.r * (p.value / p0).ln()) / self.cp).exp();
+                (
+                    p,
+                    Temperature::new::<uom::si::thermodynamic_temperature::kelvin>(t_val.max(1.0)),
+                )
+            }
         };
 
         ThermoState::from_pt(p, t, comp)
@@ -71,6 +89,14 @@ impl FluidModel for SimpleIdealGasModel {
 
     fn h(&self, state: &ThermoState) -> tf_fluids::FluidResult<SpecEnthalpy> {
         Ok(self.cp * state.temperature().value)
+    }
+
+    fn s(&self, state: &ThermoState) -> tf_fluids::FluidResult<SpecEntropy> {
+        let p = state.pressure().value;
+        let t = state.temperature().value;
+        let p0 = 101_325.0;
+        let t0 = 300.0;
+        Ok(self.cp * (t / t0).ln() - self.r * (p / p0).ln())
     }
 
     fn cp(&self, _state: &ThermoState) -> tf_fluids::FluidResult<SpecHeatCapacity> {

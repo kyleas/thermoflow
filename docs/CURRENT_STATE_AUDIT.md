@@ -1,11 +1,13 @@
 # Thermoflow Current State Audit
 
 **Date**: February 28, 2026  
-**Snapshot**: Post-Phase 3+ completion (Advanced plotting workspace with drag/resize, templates, persistence)  
+**Snapshot**: Post-Phase 3+ completion (Advanced plotting workspace + Fluid Workspace MVP)  
 **Status**: Code-grounded, verified against actual implementation  
 **Scope**: Workspace structure, canonical paths, solver architecture, plotting features, support matrix
 
-**Recent Enhancement**: Plotting workspace now supports multiple interactive plots with drag/reposition, resize, per-plot series configuration, templates, and persistent save/load. See PLOTTING_WORKSPACE.md for details.
+**Recent Enhancements**:
+- Plotting workspace supports multiple interactive plots with drag/reposition, resize, per-plot series configuration, templates, and persistent save/load
+- Fluid Workspace MVP adds a RefProp-style single-state calculator with supported input pairs (`P-T`, `P-h`, `rho-h`, `P-s`) and project persistence
 
 ---
 
@@ -18,7 +20,7 @@
 | **tf-core** | Foundation | Unit system (UoM SI), ID types, numeric traits, timing | ✅ Canonical | `TfResult`, `Real`, `Timer`, SI units |
 | **tf-graph** | Data structure | Network topology (nodes, components, edges, indexing) | ✅ Canonical | `Graph`, `GraphBuilder`, `Component`, `Node` |
 | **tf-project** | Schema | Project YAML format, validation, migration | ✅ Canonical | `Project`, `NodeKind`, `ComponentKind`, `validate_project` |
-| **tf-fluids** | Thermodynamics | CoolProp wrapper, state creation, composition | ✅ Canonical | `FluidModel`, `CoolPropModel`, `state()`, `Composition` |
+| **tf-fluids** | Thermodynamics | CoolProp wrapper, state creation, composition | ✅ Canonical | `FluidModel`, `CoolPropModel`, `state()`, `compute_equilibrium_state()` |
 | **tf-components** | Physics models | Component behavior (orifice, pipe, pump, turbine, valve, LineVolume) | ✅ Canonical | `TwoPortComponent`, `Orifice`, `Pipe`, `Pump`, `Turbine`, `Valve`, `LineVolume` |
 | **tf-solver** | Steady solver | Newton-based system solver for (P,h) unknowns | ✅ Canonical | `SteadyProblem`, `solve()`, `solve_with_progress()`, `NewtonConfig`, `InitializationStrategy` |
 | **tf-sim** | Transient solver | RK4/Euler integration with embedded steady solve | ✅ Canonical | `TransientModel`, `run_sim()`, `run_sim_with_progress()`, `ControlVolume` |
@@ -31,7 +33,7 @@
 | App | Purpose | Status | Key Code |
 |-----|---------|--------|----------|
 | **tf-cli** | Command-line interface | ✅ Canonical | `main.rs` dispatches to `cmd_run_steady()`, `cmd_run_transient()`, etc. |
-| **tf-ui** | Desktop GUI (egui) | ✅ Canonical | `app.rs` (main event loop), `run_worker.rs` (thread spawning) |
+| **tf-ui** | Desktop GUI (egui) | ✅ Canonical | `app.rs` (main event loop), `views/fluid_view.rs`, `run_worker.rs` |
 
 ### Key Observations
 

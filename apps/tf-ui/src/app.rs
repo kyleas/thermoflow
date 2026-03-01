@@ -1,8 +1,8 @@
 use crate::project_io::SystemRuntime;
 use crate::run_worker::{RunWorker, WorkerMessage};
 use crate::views::{
-    ComponentKindChoice, InspectActions, InspectView, ModuleView, NewComponentSpec, NodeKindChoice,
-    PidView, PlotView, RunView,
+    ComponentKindChoice, FluidView, InspectActions, InspectView, ModuleView, NewComponentSpec,
+    NodeKindChoice, PidView, PlotView, RunView,
 };
 use egui_file_dialog::{DialogMode, FileDialog};
 use std::path::PathBuf;
@@ -30,7 +30,9 @@ pub struct ThermoflowApp {
     pid_view: PidView,
     module_view: ModuleView,
     plot_view: PlotView,
+    fluid_view: FluidView,
     run_view: RunView,
+    fluid_workspace: crate::fluid_workspace::FluidWorkspace,
     inspect_view: InspectView,
     run_worker: Option<RunWorker>,
     use_cached: bool,
@@ -48,6 +50,7 @@ enum ViewTab {
     Pid,
     Modules,
     Plots,
+    Fluid,
     Runs,
 }
 
@@ -77,7 +80,9 @@ impl ThermoflowApp {
             pid_view: PidView::default(),
             module_view: ModuleView::default(),
             plot_view: PlotView::default(),
+            fluid_view: FluidView::default(),
             run_view: RunView::default(),
+            fluid_workspace: crate::fluid_workspace::FluidWorkspace::default(),
             inspect_view: InspectView::default(),
             run_worker: None,
             use_cached: false,
@@ -114,6 +119,7 @@ impl ThermoflowApp {
             layouts: vec![],
             runs: RunLibraryDef::default(),
             plotting_workspace: None,
+            fluid_workspace: None,
         });
         self.project_path = None;
         self.init_run_store(); // Initialize run store even without a path
@@ -122,6 +128,7 @@ impl ThermoflowApp {
         self.selected_component_id = None;
         self.selected_control_block_id = None;
         self.system_runtime = None;
+        self.fluid_workspace = crate::fluid_workspace::FluidWorkspace::default();
         self.pid_view.invalidate_layout();
     }
 
@@ -137,6 +144,13 @@ impl ThermoflowApp {
                 if let Some(plotting_workspace_def) = project.plotting_workspace.as_ref() {
                     self.plot_view.workspace =
                         crate::plot_workspace::PlotWorkspace::from_def(plotting_workspace_def);
+                }
+
+                if let Some(fluid_workspace_def) = project.fluid_workspace.as_ref() {
+                    self.fluid_workspace =
+                        crate::fluid_workspace::FluidWorkspace::from_def(fluid_workspace_def);
+                } else {
+                    self.fluid_workspace = crate::fluid_workspace::FluidWorkspace::default();
                 }
 
                 self.project = Some(project);
@@ -184,6 +198,7 @@ impl ThermoflowApp {
             if let Some(path) = self.project_path.as_ref() {
                 // Update the project with current plotting workspace state
                 project.plotting_workspace = Some(self.plot_view.workspace.to_def());
+                project.fluid_workspace = Some(self.fluid_workspace.to_def());
 
                 if let Err(e) = tf_project::save_yaml(path, project) {
                     self.last_worker_message = Some(format!("Failed to save project: {}", e));
@@ -196,6 +211,7 @@ impl ThermoflowApp {
         if let Some(project) = self.project.as_mut() {
             // Update the project with current plotting workspace state
             project.plotting_workspace = Some(self.plot_view.workspace.to_def());
+            project.fluid_workspace = Some(self.fluid_workspace.to_def());
 
             if let Err(e) = tf_project::save_yaml(&path, project) {
                 self.last_worker_message = Some(format!("Failed to save project: {}", e));
@@ -308,7 +324,7 @@ impl ThermoflowApp {
             name,
             fluid: FluidDef {
                 composition: CompositionDef::Pure {
-                    species: "Nitrogen".to_string(),
+                    species: "N2".to_string(),
                 },
             },
             nodes: vec![],
@@ -827,7 +843,7 @@ impl eframe::App for ThermoflowApp {
                 } else {
                     None
                 };
-                
+
                 self.inspect_view.show(
                     ui,
                     &mut self.project,
@@ -863,6 +879,7 @@ impl eframe::App for ThermoflowApp {
                 ui.selectable_value(&mut self.active_view, ViewTab::Pid, "P&ID");
                 ui.selectable_value(&mut self.active_view, ViewTab::Modules, "Modules");
                 ui.selectable_value(&mut self.active_view, ViewTab::Plots, "Plots");
+                ui.selectable_value(&mut self.active_view, ViewTab::Fluid, "Fluid");
                 ui.selectable_value(&mut self.active_view, ViewTab::Runs, "Runs");
             });
 
@@ -888,7 +905,10 @@ impl eframe::App for ThermoflowApp {
                 }
                 ViewTab::Plots => {
                     self.plot_view
-                        .show(ui, &self.run_store, &self.selected_run_id);
+                        .show(ui, &self.run_store, &self.selected_run_id, &self.project);
+                }
+                ViewTab::Fluid => {
+                    self.fluid_view.show(ui, &mut self.fluid_workspace);
                 }
                 ViewTab::Runs => {
                     self.run_view.show(

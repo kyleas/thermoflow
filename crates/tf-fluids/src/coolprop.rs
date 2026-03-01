@@ -3,7 +3,7 @@
 use crate::composition::Composition;
 use crate::error::{FluidError, FluidResult};
 use crate::model::{FluidModel, validation};
-use crate::state::{SpecEnthalpy, SpecHeatCapacity, StateInput, ThermoState};
+use crate::state::{SpecEnthalpy, SpecEntropy, SpecHeatCapacity, StateInput, ThermoState};
 use rfluids::prelude::*;
 use tf_core::units::{Density, Pressure, Velocity, k};
 
@@ -84,6 +84,53 @@ impl CoolPropModel {
         }
 
         // Return best estimate if we hit max iterations
+        Ok(0.5 * (t_low + t_high))
+    }
+
+    /// Solve for temperature given pressure and specific entropy.
+    fn solve_t_from_ps(&self, pure: Pure, p_pa: f64, s_target: f64) -> FluidResult<f64> {
+        const T_MIN: f64 = 100.0;
+        const T_MAX: f64 = 2000.0;
+        const MAX_ITER: usize = 100;
+
+        let mut t_low = T_MIN;
+        let mut t_high = T_MAX;
+
+        let mut fluid_low = self.fluid_at_pt(pure, p_pa, t_low)?;
+        let s_low = fluid_low.entropy().map_err(|e| FluidError::Backend {
+            message: format!("rfluids error getting entropy: {}", e),
+        })?;
+
+        let mut fluid_high = self.fluid_at_pt(pure, p_pa, t_high)?;
+        let s_high = fluid_high.entropy().map_err(|e| FluidError::Backend {
+            message: format!("rfluids error getting entropy: {}", e),
+        })?;
+
+        if s_target < s_low || s_target > s_high {
+            return Err(FluidError::OutOfRange {
+                what: "entropy outside valid range for given pressure",
+            });
+        }
+
+        for _ in 0..MAX_ITER {
+            let t_mid = 0.5 * (t_low + t_high);
+            let mut fluid_mid = self.fluid_at_pt(pure, p_pa, t_mid)?;
+            let s_mid = fluid_mid.entropy().map_err(|e| FluidError::Backend {
+                message: format!("rfluids error getting entropy: {}", e),
+            })?;
+
+            let tol = 1.0_f64.max(s_target.abs() * 1e-6);
+            if (s_mid - s_target).abs() < tol {
+                return Ok(t_mid);
+            }
+
+            if s_mid < s_target {
+                t_low = t_mid;
+            } else {
+                t_high = t_mid;
+            }
+        }
+
         Ok(0.5 * (t_low + t_high))
     }
 
@@ -289,6 +336,33 @@ impl FluidModel for CoolPropModel {
                 let t = k(t_k);
                 ThermoState::from_pt(p, t, comp)
             }
+            StateInput::RhoH { rho_kg_m3, h } => {
+                if !rho_kg_m3.is_finite() || rho_kg_m3 <= 0.0 {
+                    return Err(FluidError::NonPhysical {
+                        what: "density must be positive and finite",
+                    });
+                }
+                validation::validate_enthalpy(h)?;
+
+                let (_t_k, p_pa) = self.solve_pt_from_rho_h(pure, rho_kg_m3, h, None)?;
+                let p = tf_core::units::pa(p_pa);
+                let t_k = self.solve_t_from_ph(pure, p_pa, h)?;
+                let t = k(t_k);
+                ThermoState::from_pt(p, t, comp)
+            }
+            StateInput::PS { p, s } => {
+                validation::validate_pressure(p)?;
+                if !s.is_finite() {
+                    return Err(FluidError::NonPhysical {
+                        what: "entropy must be finite",
+                    });
+                }
+
+                let p_pa = p.value;
+                let t_k = self.solve_t_from_ps(pure, p_pa, s)?;
+                let t = k(t_k);
+                ThermoState::from_pt(p, t, comp)
+            }
         }
     }
 
@@ -343,6 +417,34 @@ impl FluidModel for CoolPropModel {
         Ok(h)
     }
 
+    fn s(&self, state: &ThermoState) -> FluidResult<SpecEntropy> {
+        let species = state
+            .composition()
+            .is_pure()
+            .ok_or(FluidError::NotSupported {
+                what: "mixtures not supported",
+            })?;
+
+        let pure = species.rfluids_pure().ok_or(FluidError::NotSupported {
+            what: "species not supported by rfluids",
+        })?;
+
+        let p_pa = state.pressure().value;
+        let t_k = state.temperature().value;
+
+        let mut fluid = self.fluid_at_pt(pure, p_pa, t_k)?;
+        let s = fluid.entropy().map_err(|e| FluidError::Backend {
+            message: format!("rfluids error getting entropy: {}", e),
+        })?;
+
+        if !s.is_finite() {
+            return Err(FluidError::NonPhysical {
+                what: "entropy must be finite",
+            });
+        }
+        Ok(s)
+    }
+
     fn cp(&self, state: &ThermoState) -> FluidResult<SpecHeatCapacity> {
         use tf_core::timing;
 
@@ -376,6 +478,34 @@ impl FluidModel for CoolPropModel {
         }
 
         Ok(cp)
+    }
+
+    fn cv(&self, state: &ThermoState) -> FluidResult<SpecHeatCapacity> {
+        let species = state
+            .composition()
+            .is_pure()
+            .ok_or(FluidError::NotSupported {
+                what: "mixtures not supported",
+            })?;
+
+        let pure = species.rfluids_pure().ok_or(FluidError::NotSupported {
+            what: "species not supported by rfluids",
+        })?;
+
+        let p_pa = state.pressure().value;
+        let t_k = state.temperature().value;
+
+        let mut fluid = self.fluid_at_pt(pure, p_pa, t_k)?;
+        let cp = fluid.specific_heat().map_err(|e| FluidError::Backend {
+            message: format!("rfluids error getting cp: {}", e),
+        })?;
+        let rho = fluid.density().map_err(|e| FluidError::Backend {
+            message: format!("rfluids error getting density: {}", e),
+        })?;
+        let r_specific = p_pa / (rho * t_k);
+        let cv = cp - r_specific;
+        validation::validate_cp(cv)?;
+        Ok(cv)
     }
 
     fn gamma(&self, state: &ThermoState) -> FluidResult<f64> {

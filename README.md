@@ -7,7 +7,7 @@ Thermoflow combines:
 - **System Simulation**: Steady-state and transient modeling of fluid networks (pumps, turbines, pipes, orifices, valves)
 - **Fluid Properties**: RefProp-compatible thermodynamic and transport property calculations
 - **Cycle Analysis**: Engine design, turbopump matching, and parametric studies
-- **Interactive Plotting**: Time-series visualization for nodes, components, and control blocks; result comparison and parameter sweeps
+- **Interactive Plotting**: Time-series visualization for nodes, components, and control blocks; arbitrary curve plotting for valve characteristics and actuator responses; result comparison and parameter sweeps
 
 ## Quick Start
 
@@ -122,9 +122,9 @@ Thermoflow is one unified application with multiple **workspaces**:
 
 Define and simulate fluid networks. Draw P&ID diagrams, set boundary conditions, execute simulations, and inspect results. Deploy state overlays on the diagram to visualize pressure, temperature, and flow.
 
-### Fluid Workspace (Phase 4)
+### Fluid Workspace (MVP)
 
-Standalone fluid property explorer. Browse thermodynamic data, create property plots, and manage state point libraries—no external RefProp needed.
+Single-state fluid calculator. Select a species, choose an input pair (`P-T`, `P-h`, `rho-h`, `P-s`), compute equilibrium state, and inspect a full property table.
 
 ### Cycle Workspace (Phase 6)
 
@@ -143,6 +143,8 @@ Compare results across multiple runs. Create parameter sweeps, sensitivity matri
 - Closed-loop transient controls (measured variable, sampled PI/PID, actuator-driven valve)
 - P&ID editor (node/component creation, control block placement, signal wiring, control parameter tuning)
 - Control history plotting (visualize control block outputs, setpoints, and actuator positions over time)
+- Arbitrary curve plotting (valve characteristic curves, actuator response curves)
+- Fluid Workspace MVP (single-state RefProp-style calculator with persistent workspace state)
 - Project file format (YAML)
 - Run caching and time-series storage
 - CLI with full command set
@@ -159,7 +161,7 @@ Compare results across multiple runs. Create parameter sweeps, sensitivity matri
 ### Planned
 
 - Phase 3: Drag-and-drop P&ID editor, state overlays
-- Phase 4: Fluid workspace
+- Phase 4: Fluid workspace expansion (property sweeps, plotting, state libraries)
 - Phase 5: CEA integration, combustion support
 - Phase 6: Cycle workspace, turbopump matching
 - Phase 7: Advanced analysis, optimization framework

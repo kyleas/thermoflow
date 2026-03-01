@@ -1,7 +1,9 @@
 //! Advanced plotting workspace with tabbed interface and split layouts.
 
+use crate::curve_generator::generate_curve_data;
 use crate::plot_workspace::{PlotPanel, PlotWorkspace};
 use egui_plot::{Legend, Line, Plot, PlotPoints};
+use tf_project::schema::Project;
 use tf_results::{RunStore, TimeseriesRecord};
 
 /// Split container ID for identifying containers in the tree
@@ -72,13 +74,13 @@ pub struct PlotView {
     next_container_id: ContainerId,
     active_container_id: Option<ContainerId>,
     selected_plot_id: Option<String>, // The plot that drives the inspector panel
-    next_plot_number: usize, // Global counter for plot numbering
+    next_plot_number: usize,          // Global counter for plot numbering
     // Drag state
     dragging_panel_id: Option<String>,
     dragging_from_container: Option<ContainerId>,
     drop_target: Option<(ContainerId, DropZone)>,
     dragging_divider_id: Option<ContainerId>, // For resizing splits
-    divider_ratio_delta: f32, // Track how much the divider has moved
+    divider_ratio_delta: f32,                 // Track how much the divider has moved
 }
 
 impl Default for PlotView {
@@ -109,21 +111,16 @@ impl Default for PlotView {
 impl PlotView {
     /// Find a container by ID in the tree (read-only)
     #[allow(dead_code)]
-    fn find_container_ref(
-        container: &SplitContainer,
-        id: ContainerId,
-    ) -> Option<&SplitContainer> {
+    fn find_container_ref(container: &SplitContainer, id: ContainerId) -> Option<&SplitContainer> {
         if container.get_id() == id {
             return Some(container);
         }
         match container {
             SplitContainer::HSplit { left, right, .. } => {
-                Self::find_container_ref(left, id)
-                    .or_else(|| Self::find_container_ref(right, id))
+                Self::find_container_ref(left, id).or_else(|| Self::find_container_ref(right, id))
             }
             SplitContainer::VSplit { top, bottom, .. } => {
-                Self::find_container_ref(top, id)
-                    .or_else(|| Self::find_container_ref(bottom, id))
+                Self::find_container_ref(top, id).or_else(|| Self::find_container_ref(bottom, id))
             }
             SplitContainer::Leaf { .. } => None,
         }
@@ -143,7 +140,11 @@ impl PlotView {
     /// Remove a panel from all containers in the tree to prevent duplicates
     fn remove_panel_globally(container: &mut SplitContainer, panel_id: &str) {
         match container {
-            SplitContainer::Leaf { panel_ids, active_tab, .. } => {
+            SplitContainer::Leaf {
+                panel_ids,
+                active_tab,
+                ..
+            } => {
                 if let Some(idx) = panel_ids.iter().position(|id| id == panel_id) {
                     panel_ids.remove(idx);
                     // Adjust active_tab if needed
@@ -167,19 +168,32 @@ impl PlotView {
     fn consolidate_container(&self, container: SplitContainer) -> SplitContainer {
         match container {
             SplitContainer::Leaf { .. } => container,
-            SplitContainer::HSplit { id, left, right, ratio } => {
+            SplitContainer::HSplit {
+                id,
+                left,
+                right,
+                ratio,
+            } => {
                 let left_consolidated = self.consolidate_container(*left);
                 let right_consolidated = self.consolidate_container(*right);
 
                 // If left is empty, return right
-                if let SplitContainer::Leaf { panel_ids: ref l_ids, .. } = left_consolidated {
+                if let SplitContainer::Leaf {
+                    panel_ids: ref l_ids,
+                    ..
+                } = left_consolidated
+                {
                     if l_ids.is_empty() {
                         return right_consolidated;
                     }
                 }
 
                 // If right is empty, return left
-                if let SplitContainer::Leaf { panel_ids: ref r_ids, .. } = right_consolidated {
+                if let SplitContainer::Leaf {
+                    panel_ids: ref r_ids,
+                    ..
+                } = right_consolidated
+                {
                     if r_ids.is_empty() {
                         return left_consolidated;
                     }
@@ -192,19 +206,32 @@ impl PlotView {
                     ratio,
                 }
             }
-            SplitContainer::VSplit { id, top, bottom, ratio } => {
+            SplitContainer::VSplit {
+                id,
+                top,
+                bottom,
+                ratio,
+            } => {
                 let top_consolidated = self.consolidate_container(*top);
                 let bottom_consolidated = self.consolidate_container(*bottom);
 
                 // If top is empty, return bottom
-                if let SplitContainer::Leaf { panel_ids: ref t_ids, .. } = top_consolidated {
+                if let SplitContainer::Leaf {
+                    panel_ids: ref t_ids,
+                    ..
+                } = top_consolidated
+                {
                     if t_ids.is_empty() {
                         return bottom_consolidated;
                     }
                 }
 
                 // If bottom is empty, return top
-                if let SplitContainer::Leaf { panel_ids: ref b_ids, .. } = bottom_consolidated {
+                if let SplitContainer::Leaf {
+                    panel_ids: ref b_ids,
+                    ..
+                } = bottom_consolidated
+                {
                     if b_ids.is_empty() {
                         return top_consolidated;
                     }
@@ -230,12 +257,10 @@ impl PlotView {
         }
         match container {
             SplitContainer::HSplit { left, right, .. } => {
-                Self::find_container_mut(left, id)
-                    .or_else(|| Self::find_container_mut(right, id))
+                Self::find_container_mut(left, id).or_else(|| Self::find_container_mut(right, id))
             }
             SplitContainer::VSplit { top, bottom, .. } => {
-                Self::find_container_mut(top, id)
-                    .or_else(|| Self::find_container_mut(bottom, id))
+                Self::find_container_mut(top, id).or_else(|| Self::find_container_mut(bottom, id))
             }
             SplitContainer::Leaf { .. } => None,
         }
@@ -248,12 +273,15 @@ impl PlotView {
 
         // Handle tab docking (add to container's tabs)
         if zone == DropZone::Tab {
-            if let Some(container) = Self::find_container_mut(&mut self.root_container, target_container_id) {
-                if let SplitContainer::Leaf { panel_ids, active_tab, .. } = container {
-                    panel_ids.push(panel_id.clone());
-                    *active_tab = panel_ids.len() - 1;
-                    self.selected_plot_id = Some(panel_id);
-                }
+            if let Some(SplitContainer::Leaf {
+                panel_ids,
+                active_tab,
+                ..
+            }) = Self::find_container_mut(&mut self.root_container, target_container_id)
+            {
+                panel_ids.push(panel_id.clone());
+                *active_tab = panel_ids.len() - 1;
+                self.selected_plot_id = Some(panel_id);
             }
             // Clean up empty containers after tab docking
             self.cleanup_empty_containers();
@@ -267,8 +295,14 @@ impl PlotView {
         let new_leaf = SplitContainer::new_leaf(new_id, vec![panel_id]);
 
         // Find and split the target container
-        Self::split_container_at(&mut self.root_container, target_container_id, zone, new_leaf, &mut self.next_container_id);
-        
+        Self::split_container_at(
+            &mut self.root_container,
+            target_container_id,
+            zone,
+            new_leaf,
+            &mut self.next_container_id,
+        );
+
         // Clean up empty containers
         self.cleanup_empty_containers();
     }
@@ -282,11 +316,9 @@ impl PlotView {
         next_id: &mut ContainerId,
     ) {
         if container.get_id() == target_id {
-            let old_container = std::mem::replace(
-                container,
-                SplitContainer::new_leaf(0, Vec::new()),
-            );
-            
+            let old_container =
+                std::mem::replace(container, SplitContainer::new_leaf(0, Vec::new()));
+
             let split_id = *next_id;
             *next_id += 1;
 
@@ -370,14 +402,24 @@ impl PlotView {
         delta: f32,
     ) {
         match container {
-            SplitContainer::HSplit { id, ratio, left, right } => {
+            SplitContainer::HSplit {
+                id,
+                ratio,
+                left,
+                right,
+            } => {
                 if *id == target_id {
                     *ratio = (*ratio + delta).clamp(0.2, 0.8);
                 }
                 Self::apply_divider_delta_recursive(left, target_id, delta);
                 Self::apply_divider_delta_recursive(right, target_id, delta);
             }
-            SplitContainer::VSplit { id, ratio, top, bottom } => {
+            SplitContainer::VSplit {
+                id,
+                ratio,
+                top,
+                bottom,
+            } => {
                 if *id == target_id {
                     *ratio = (*ratio + delta).clamp(0.2, 0.8);
                 }
@@ -394,6 +436,7 @@ impl PlotView {
         ui: &mut egui::Ui,
         run_store: &Option<RunStore>,
         selected_run_id: &Option<String>,
+        project: &Option<Project>,
     ) {
         ui.heading("Plotting Workspace");
         ui.separator();
@@ -418,9 +461,8 @@ impl PlotView {
         if self.workspace.panels.is_empty() && selected_run_id.is_some() {
             let title = format!("Plot {}", self.next_plot_number);
             self.next_plot_number += 1;
-            let panel_id = self.workspace
-                .create_panel(title, selected_run_id.clone());
-            
+            let panel_id = self.workspace.create_panel(title, selected_run_id.clone());
+
             // Add to root container
             if let SplitContainer::Leaf { panel_ids, .. } = &mut self.root_container {
                 panel_ids.push(panel_id.clone());
@@ -462,32 +504,40 @@ impl PlotView {
         }
 
         // ===== TOOLBAR =====
-        let new_plot_requested = ui.horizontal(|ui| {
-            let new_plot = ui.button("➕ New Plot").clicked();
+        let new_plot_requested = ui
+            .horizontal(|ui| {
+                let new_plot = ui.button("➕ New Plot").clicked();
 
-            if ui.button("📋 Templates").clicked() {
-                self.show_template_manager = !self.show_template_manager;
-            }
+                if ui.button("📋 Templates").clicked() {
+                    self.show_template_manager = !self.show_template_manager;
+                }
 
-            ui.separator();
-            ui.label(format!("Drag tabs to split views | {} plot(s)", self.workspace.panels.len()));
+                ui.separator();
+                ui.label(format!(
+                    "Drag tabs to split views | {} plot(s)",
+                    self.workspace.panels.len()
+                ));
 
-            new_plot
-        }).inner;
+                new_plot
+            })
+            .inner;
 
         // Handle new plot creation
         if new_plot_requested {
             let title = format!("Plot {}", self.next_plot_number);
             self.next_plot_number += 1;
             let new_id = self.workspace.create_panel(title, selected_run_id.clone());
-            
+
             // Add to active container
             if let Some(active_id) = self.active_container_id {
-                if let Some(container) = Self::find_container_mut(&mut self.root_container, active_id) {
-                    if let SplitContainer::Leaf { panel_ids, active_tab, .. } = container {
-                        panel_ids.push(new_id);
-                        *active_tab = panel_ids.len() - 1;
-                    }
+                if let Some(SplitContainer::Leaf {
+                    panel_ids,
+                    active_tab,
+                    ..
+                }) = Self::find_container_mut(&mut self.root_container, active_id)
+                {
+                    panel_ids.push(new_id);
+                    *active_tab = panel_ids.len() - 1;
                 }
             }
         }
@@ -521,14 +571,14 @@ impl PlotView {
         // ===== MAIN SPLIT LAYOUT =====
         let available_rect = ui.available_rect_before_wrap();
         let root_container_clone = self.root_container.clone();
-        
-        self.render_split_container(ui, &root_container_clone, available_rect);
-        
+
+        self.render_split_container(ui, &root_container_clone, available_rect, project);
+
         // Apply any pending divider ratio updates
         if let Some(divider_id) = self.dragging_divider_id {
             let delta = self.divider_ratio_delta;
             self.apply_divider_delta(divider_id, delta);
-            
+
             // Stop tracking on release
             if ui.input(|i| i.pointer.any_released()) {
                 self.dragging_divider_id = None;
@@ -537,8 +587,9 @@ impl PlotView {
         }
 
         // Handle drop if drag released
-        if let (Some(dragging_id), Some((target_id, zone))) = 
-            (&self.dragging_panel_id.clone(), &self.drop_target) {
+        if let (Some(dragging_id), Some((target_id, zone))) =
+            (&self.dragging_panel_id.clone(), &self.drop_target)
+        {
             if ui.input(|i| i.pointer.any_released()) {
                 self.apply_drop(*target_id, *zone, dragging_id.clone());
                 self.dragging_panel_id = None;
@@ -554,37 +605,43 @@ impl PlotView {
         ui: &mut egui::Ui,
         container: &SplitContainer,
         rect: egui::Rect,
+        project: &Option<Project>,
     ) {
         match container {
-            SplitContainer::Leaf { id, panel_ids, active_tab } => {
-                self.render_leaf_container(ui, *id, panel_ids, *active_tab, rect);
+            SplitContainer::Leaf {
+                id,
+                panel_ids,
+                active_tab,
+            } => {
+                self.render_leaf_container(ui, *id, panel_ids, *active_tab, rect, project);
             }
-            SplitContainer::HSplit { id, left, right, ratio } => {
+            SplitContainer::HSplit {
+                id,
+                left,
+                right,
+                ratio,
+            } => {
                 let split_pos = rect.left() + rect.width() * ratio;
-                
-                let left_rect =egui::Rect::from_min_max(
-                    rect.min,
-                    egui::pos2(split_pos - 2.0, rect.max.y),
-                );
-                let right_rect = egui::Rect::from_min_max(
-                    egui::pos2(split_pos + 2.0, rect.min.y),
-                    rect.max,
-                );
 
-                self.render_split_container(ui, left, left_rect);
-                
+                let left_rect =
+                    egui::Rect::from_min_max(rect.min, egui::pos2(split_pos - 2.0, rect.max.y));
+                let right_rect =
+                    egui::Rect::from_min_max(egui::pos2(split_pos + 2.0, rect.min.y), rect.max);
+
+                self.render_split_container(ui, left, left_rect, project);
+
                 // Draw and handle divider interaction
                 let divider_rect = egui::Rect::from_min_max(
                     egui::pos2(split_pos - 2.0, rect.min.y),
                     egui::pos2(split_pos + 2.0, rect.max.y),
                 );
-                
+
                 let divider_response = ui.interact(
                     divider_rect,
                     ui.id().with("divider_h").with(*id),
                     egui::Sense::drag(),
                 );
-                
+
                 // Highlight divider on hover
                 let divider_color = if divider_response.hovered() || divider_response.dragged() {
                     egui::Color32::from_rgb(100, 150, 255)
@@ -592,12 +649,12 @@ impl PlotView {
                     egui::Color32::from_gray(60)
                 };
                 ui.painter().rect_filled(divider_rect, 0.0, divider_color);
-                
+
                 // Handle dragging
                 if divider_response.dragged() {
                     let drag_delta = ui.input(|i| i.pointer.delta()).x;
                     let new_ratio = (ratio + drag_delta / rect.width()).clamp(0.2, 0.8);
-                    
+
                     // Store the update to apply after rendering
                     if self.dragging_divider_id != Some(*id) {
                         self.dragging_divider_id = Some(*id);
@@ -606,34 +663,35 @@ impl PlotView {
                     self.divider_ratio_delta = new_ratio - ratio;
                 }
 
-                self.render_split_container(ui, right, right_rect);
+                self.render_split_container(ui, right, right_rect, project);
             }
-            SplitContainer::VSplit { id, top, bottom, ratio } => {
+            SplitContainer::VSplit {
+                id,
+                top,
+                bottom,
+                ratio,
+            } => {
                 let split_pos = rect.top() + rect.height() * ratio;
-                
-                let top_rect = egui::Rect::from_min_max(
-                    rect.min,
-                    egui::pos2(rect.max.x, split_pos - 2.0),
-                );
-                let bottom_rect = egui::Rect::from_min_max(
-                    egui::pos2(rect.min.x, split_pos + 2.0),
-                    rect.max,
-                );
 
-                self.render_split_container(ui, top, top_rect);
-                
+                let top_rect =
+                    egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, split_pos - 2.0));
+                let bottom_rect =
+                    egui::Rect::from_min_max(egui::pos2(rect.min.x, split_pos + 2.0), rect.max);
+
+                self.render_split_container(ui, top, top_rect, project);
+
                 // Draw and handle divider interaction
                 let divider_rect = egui::Rect::from_min_max(
                     egui::pos2(rect.min.x, split_pos - 2.0),
                     egui::pos2(rect.max.x, split_pos + 2.0),
                 );
-                
+
                 let divider_response = ui.interact(
                     divider_rect,
                     ui.id().with("divider_v").with(*id),
                     egui::Sense::drag(),
                 );
-                
+
                 // Highlight divider on hover
                 let divider_color = if divider_response.hovered() || divider_response.dragged() {
                     egui::Color32::from_rgb(100, 150, 255)
@@ -641,12 +699,12 @@ impl PlotView {
                     egui::Color32::from_gray(60)
                 };
                 ui.painter().rect_filled(divider_rect, 0.0, divider_color);
-                
+
                 // Handle dragging
                 if divider_response.dragged() {
                     let drag_delta = ui.input(|i| i.pointer.delta()).y;
                     let new_ratio = (ratio + drag_delta / rect.height()).clamp(0.2, 0.8);
-                    
+
                     // Store the update to apply after rendering
                     if self.dragging_divider_id != Some(*id) {
                         self.dragging_divider_id = Some(*id);
@@ -655,7 +713,7 @@ impl PlotView {
                     self.divider_ratio_delta = new_ratio - ratio;
                 }
 
-                self.render_split_container(ui, bottom, bottom_rect);
+                self.render_split_container(ui, bottom, bottom_rect, project);
             }
         }
     }
@@ -668,6 +726,7 @@ impl PlotView {
         panel_ids: &[String],
         mut active_tab: usize,
         rect: egui::Rect,
+        project: &Option<Project>,
     ) {
         // Guard against invalid active_tab
         if active_tab >= panel_ids.len() && !panel_ids.is_empty() {
@@ -675,17 +734,17 @@ impl PlotView {
         }
 
         // Draw container background
-        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(20));
+        ui.painter()
+            .rect_filled(rect, 0.0, egui::Color32::from_gray(20));
 
         // Tab bar height
         let tab_height = 30.0;
-        let tab_bar_rect = egui::Rect::from_min_max(
-            rect.min,
-            egui::pos2(rect.max.x, rect.min.y + tab_height),
-        );
+        let tab_bar_rect =
+            egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.min.y + tab_height));
 
         // Draw tab bar background
-        ui.painter().rect_filled(tab_bar_rect, 0.0, egui::Color32::from_gray(30));
+        ui.painter()
+            .rect_filled(tab_bar_rect, 0.0, egui::Color32::from_gray(30));
 
         // Render tabs
         let mut tab_x = rect.min.x + 5.0;
@@ -752,10 +811,10 @@ impl PlotView {
 
         // Update active tab if changed
         if new_active_tab != active_tab {
-            if let Some(container) = Self::find_container_mut(&mut self.root_container, container_id) {
-                if let SplitContainer::Leaf { active_tab: at, .. } = container {
-                    *at = new_active_tab;
-                }
+            if let Some(SplitContainer::Leaf { active_tab: at, .. }) =
+                Self::find_container_mut(&mut self.root_container, container_id)
+            {
+                *at = new_active_tab;
             }
         }
 
@@ -782,8 +841,12 @@ impl PlotView {
 
                 // Check if plot has series
                 let has_series = !panel.series_selection.node_ids_and_variables.is_empty()
-                    || !panel.series_selection.component_ids_and_variables.is_empty()
-                    || !panel.series_selection.control_ids.is_empty();
+                    || !panel
+                        .series_selection
+                        .component_ids_and_variables
+                        .is_empty()
+                    || !panel.series_selection.control_ids.is_empty()
+                    || !panel.series_selection.arbitrary_curves.is_empty();
 
                 if !has_series {
                     // Show hint
@@ -803,39 +866,52 @@ impl PlotView {
                             .layout(egui::Layout::top_down(egui::Align::Min))
                             .id_salt(active_panel_id),
                     );
-                    self.render_plot(&mut plot_ui, &panel, &self.cached_timeseries);
+                    self.render_plot(&mut plot_ui, &panel, &self.cached_timeseries, project);
                 }
             }
         }
     }
 
     /// Draw drop zones for drag-to-split
-    fn draw_drop_zones(&mut self, ui: &mut egui::Ui, container_id: ContainerId, rect: egui::Rect, tab_height: f32) {
+    fn draw_drop_zones(
+        &mut self,
+        ui: &mut egui::Ui,
+        container_id: ContainerId,
+        rect: egui::Rect,
+        tab_height: f32,
+    ) {
         let zone_size = 50.0;
-        
+
         // Tab zone is the tab bar area
-        let tab_zone_rect = egui::Rect::from_min_max(
-            rect.min,
-            egui::pos2(rect.max.x, rect.min.y + tab_height),
-        );
-        
+        let tab_zone_rect =
+            egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.min.y + tab_height));
+
         let zones = [
-            (DropZone::Left, egui::Rect::from_min_size(
-                rect.min,
-                egui::vec2(zone_size, rect.height()),
-            )),
-            (DropZone::Right, egui::Rect::from_min_size(
-                egui::pos2(rect.max.x - zone_size, rect.min.y),
-                egui::vec2(zone_size, rect.height()),
-            )),
-            (DropZone::Top, egui::Rect::from_min_size(
-                egui::pos2(rect.min.x, rect.min.y + tab_height),
-                egui::vec2(rect.width(), zone_size),
-            )),
-            (DropZone::Bottom, egui::Rect::from_min_size(
-                egui::pos2(rect.min.x, rect.max.y - zone_size),
-                egui::vec2(rect.width(), zone_size),
-            )),
+            (
+                DropZone::Left,
+                egui::Rect::from_min_size(rect.min, egui::vec2(zone_size, rect.height())),
+            ),
+            (
+                DropZone::Right,
+                egui::Rect::from_min_size(
+                    egui::pos2(rect.max.x - zone_size, rect.min.y),
+                    egui::vec2(zone_size, rect.height()),
+                ),
+            ),
+            (
+                DropZone::Top,
+                egui::Rect::from_min_size(
+                    egui::pos2(rect.min.x, rect.min.y + tab_height),
+                    egui::vec2(rect.width(), zone_size),
+                ),
+            ),
+            (
+                DropZone::Bottom,
+                egui::Rect::from_min_size(
+                    egui::pos2(rect.min.x, rect.max.y - zone_size),
+                    egui::vec2(rect.width(), zone_size),
+                ),
+            ),
         ];
 
         for (zone, zone_rect) in zones {
@@ -875,7 +951,7 @@ impl PlotView {
                 );
             }
         }
-        
+
         // Tab zone detection - hover over tab bar to dock in same container
         let tab_is_hovered = ui.input(|i| {
             if let Some(pos) = i.pointer.hover_pos() {
@@ -884,17 +960,17 @@ impl PlotView {
                 false
             }
         });
-        
+
         if tab_is_hovered {
             self.drop_target = Some((container_id, DropZone::Tab));
-            
+
             let alpha = 100;
             ui.painter().rect_filled(
                 tab_zone_rect,
                 4.0,
                 egui::Color32::from_rgba_unmultiplied(100, 200, 100, alpha),
             );
-            
+
             ui.painter().text(
                 tab_zone_rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -919,8 +995,7 @@ impl PlotView {
                         ui.label(format!("📌 {}", template.name));
 
                         if ui.button("✓ Apply").clicked() {
-                            if let Some(selected_id) = &self.workspace.selected_panel_id.clone()
-                            {
+                            if let Some(selected_id) = &self.workspace.selected_panel_id.clone() {
                                 self.workspace
                                     .apply_template_to_panel(selected_id, _template_id);
                             }
@@ -1103,7 +1178,13 @@ impl PlotView {
     }
 
     /// Render a single plot for a panel.
-    fn render_plot(&self, ui: &mut egui::Ui, panel: &PlotPanel, timeseries: &[TimeseriesRecord]) {
+    fn render_plot(
+        &self,
+        ui: &mut egui::Ui,
+        panel: &PlotPanel,
+        timeseries: &[TimeseriesRecord],
+        project: &Option<Project>,
+    ) {
         let mut lines = Vec::new();
 
         // Add node series
@@ -1181,6 +1262,33 @@ impl PlotView {
                 let plot_points: PlotPoints = points.into();
                 let line = Line::new(plot_points).name(control_id);
                 lines.push(line);
+            }
+        }
+
+        // Add arbitrary curve series
+        if !panel.series_selection.arbitrary_curves.is_empty() {
+            for curve_source in &panel.series_selection.arbitrary_curves {
+                match generate_curve_data(curve_source, project.as_ref()) {
+                    Some(curve_data) => {
+                        if curve_data.x_values.len() == curve_data.y_values.len()
+                            && !curve_data.x_values.is_empty()
+                        {
+                            let points: Vec<[f64; 2]> = curve_data
+                                .x_values
+                                .iter()
+                                .zip(curve_data.y_values.iter())
+                                .map(|(x, y)| [*x, *y])
+                                .collect();
+                            let plot_points: PlotPoints = points.into();
+                            let line = Line::new(plot_points).name(&curve_data.label);
+                            lines.push(line);
+                        }
+                    }
+                    None => {
+                        // Curve generation failed - skip silently
+                        // (Could add diagnostics here if needed)
+                    }
+                }
             }
         }
 

@@ -1,148 +1,175 @@
 version: 2
-name: "Flow-Controlled Valve (Closed Loop)"
+name: Flow-Controlled Valve (Closed Loop)
 systems:
-  - id: s1
-    name: "Flow-Controlled Valve"
-    fluid:
-      composition:
-        type: Pure
-        species: Nitrogen
-    nodes:
-      - id: n_upstream
-        name: "Upstream CV"
-        kind:
-          type: ControlVolume
-          volume_m3: 0.04
-          initial:
-            mode: PT
-            p_pa: 900000.0
-            t_k: 305.0
-      - id: n_downstream
-        name: "Downstream CV"
-        kind:
-          type: ControlVolume
-          volume_m3: 0.02
-          initial:
-            mode: PT
-            p_pa: 240000.0
-            t_k: 300.0
-      - id: n_ambient
-        name: "Ambient"
-        kind:
-          type: Atmosphere
-          pressure_pa: 101325.0
-          temperature_k: 300.0
-    components:
-      - id: v_control
-        name: "Control Valve"
-        kind:
-          type: Valve
-          cd: 0.85
-          area_max_m2: 0.00009
-          position: 0.25
-          law:
-            type: Linear
-          treat_as_gas: true
-        from_node_id: n_upstream
-        to_node_id: n_downstream
-      - id: o_vent
-        name: "Outlet Orifice"
-        kind:
-          type: Orifice
-          cd: 0.8
-          area_m2: 0.00005
-          treat_as_gas: true
-        from_node_id: n_downstream
-        to_node_id: n_ambient
-    boundaries: []
-    schedules: []
-    controls:
-      blocks:
-        - id: sp_flow
-          name: "Flow Setpoint"
-          kind:
-            type: Constant
-            value: 0.05
-        - id: m_flow
-          name: "Valve Mass Flow"
-          kind:
-            type: MeasuredVariable
-            reference:
-              type: EdgeMassFlow
-              component_id: v_control
-        - id: c_flow_pi
-          name: "Flow PI"
-          kind:
-            type: PIController
-            kp: 3.0
-            ti_s: 0.5
-            out_min: 0.0
-            out_max: 1.0
-            sample_period_s: 0.05
-        - id: a_control
-          name: "Valve Actuator"
-          kind:
-            type: FirstOrderActuator
-            tau_s: 0.15
-            rate_limit_per_s: 4.0
-            initial_position: 0.25
-        - id: sink_control
-          name: "Control Valve Command"
-          kind:
-            type: ActuatorCommand
-            component_id: v_control
-      connections:
-        - from_block_id: sp_flow
-          to_block_id: c_flow_pi
-          to_input: setpoint
-        - from_block_id: m_flow
-          to_block_id: c_flow_pi
-          to_input: process
-        - from_block_id: c_flow_pi
-          to_block_id: a_control
-          to_input: command
-        - from_block_id: a_control
-          to_block_id: sink_control
-          to_input: position
+- id: s1
+  name: Flow-Controlled Valve
+  fluid:
+    composition:
+      type: Pure
+      species: Nitrogen
+  nodes:
+  - id: n_upstream
+    name: Upstream CV
+    kind:
+      type: ControlVolume
+      volume_m3: 0.04
+      initial:
+        mode: PT
+        p_pa: 900000.0
+        t_k: 305.0
+        h_j_per_kg: null
+        m_kg: null
+  - id: n_downstream
+    name: Downstream CV
+    kind:
+      type: ControlVolume
+      volume_m3: 0.02
+      initial:
+        mode: PT
+        p_pa: 240000.0
+        t_k: 300.0
+        h_j_per_kg: null
+        m_kg: null
+  - id: n_ambient
+    name: Ambient
+    kind:
+      type: Atmosphere
+      pressure_pa: 101325.0
+      temperature_k: 300.0
+  components:
+  - id: v_control
+    name: Control Valve
+    kind:
+      type: Valve
+      cd: 0.85
+      area_max_m2: 0.00009
+      position: 0.25
+      law:
+        type: Linear
+      treat_as_gas: true
+    from_node_id: n_upstream
+    to_node_id: n_downstream
+  - id: o_vent
+    name: Outlet Orifice
+    kind:
+      type: Orifice
+      cd: 0.8
+      area_m2: 0.00005
+      treat_as_gas: true
+    from_node_id: n_downstream
+    to_node_id: n_ambient
+  boundaries: []
+  schedules: []
+  controls:
+    blocks:
+    - id: sp_flow
+      name: Flow Setpoint
+      kind:
+        type: Constant
+        value: 0.05
+    - id: m_flow
+      name: Valve Mass Flow
+      kind:
+        type: MeasuredVariable
+        reference:
+          type: EdgeMassFlow
+          component_id: v_control
+    - id: c_flow_pi
+      name: Flow PI
+      kind:
+        type: PIController
+        kp: 3.0
+        ti_s: 0.5
+        out_min: 0.0
+        out_max: 1.0
+        sample_period_s: 0.05
+    - id: a_control
+      name: Valve Actuator
+      kind:
+        type: FirstOrderActuator
+        tau_s: 0.15
+        rate_limit_per_s: 4.0
+        initial_position: 0.25
+    - id: sink_control
+      name: Control Valve Command
+      kind:
+        type: ActuatorCommand
+        component_id: v_control
+    connections:
+    - from_block_id: sp_flow
+      to_block_id: c_flow_pi
+      to_input: setpoint
+    - from_block_id: m_flow
+      to_block_id: c_flow_pi
+      to_input: process
+    - from_block_id: c_flow_pi
+      to_block_id: a_control
+      to_input: command
+    - from_block_id: a_control
+      to_block_id: sink_control
+      to_input: position
 modules: []
 layouts:
-  - system_id: s1
-    nodes:
+- system_id: s1
+  nodes:
+  - node_id: n_upstream
+    x: 130.0
+    y: 220.0
+    label_offset_x: 0.0
+    label_offset_y: 0.0
+  - node_id: n_downstream
+    x: 340.0
+    y: 220.0
+    label_offset_x: 0.0
+    label_offset_y: 0.0
+  - node_id: n_ambient
+    x: 560.0
+    y: 220.0
+    label_offset_x: 0.0
+    label_offset_y: 0.0
+  edges:
+  - component_id: v_control
+    points:
+    - x: 130.0
+      y: 220.0
+    - x: 340.0
+      y: 220.0
+    label_offset_x: 0.0
+    label_offset_y: 0.0
+  - component_id: o_vent
+    points:
+    - x: 340.0
+      y: 220.0
+    - x: 560.0
+      y: 220.0
+    label_offset_x: 0.0
+    label_offset_y: 0.0
+  control_blocks: []
+  signal_connections: []
+  overlay:
+    show_pressure: true
+    show_temperature: true
+    show_enthalpy: false
+    show_density: false
+    show_mass_flow: true
+runs:
+  runs: []
+plotting_workspace:
+  panels:
+  - id: panel_1b72d285-b52f-4080-b3c8-5e81ebfa3f04
+    title: Plot 1
+    x: 10.0
+    y: 10.0
+    width: 500.0
+    height: 400.0
+    run_id: bdc1152c9db44709a51b1a4a42a8042ce35f0966e456553643476cafef2ccb80
+    series_selection:
+      node_ids_and_variables:
       - node_id: n_upstream
-        x: 130.0
-        y: 220.0
-        label_offset_x: 0.0
-        label_offset_y: 0.0
-      - node_id: n_downstream
-        x: 340.0
-        y: 220.0
-        label_offset_x: 0.0
-        label_offset_y: 0.0
-      - node_id: n_ambient
-        x: 560.0
-        y: 220.0
-        label_offset_x: 0.0
-        label_offset_y: 0.0
-    edges:
-      - component_id: v_control
-        points:
-          - x: 130.0
-            y: 220.0
-          - x: 340.0
-            y: 220.0
-        label_offset_x: 0.0
-        label_offset_y: 0.0
-      - component_id: o_vent
-        points:
-          - x: 340.0
-            y: 220.0
-          - x: 560.0
-            y: 220.0
-        label_offset_x: 0.0
-        label_offset_y: 0.0
-    overlay:
-      show_pressure: true
-      show_temperature: true
-      show_enthalpy: false
-      show_density: false
-      show_mass_flow: true
+        variable: Pressure
+      component_ids_and_variables: []
+      control_ids: []
+      arbitrary_curves: []
+  templates: []
+  workspace_width: 1200.0
+  workspace_height: 800.0

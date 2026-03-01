@@ -2,6 +2,11 @@
 #![allow(clippy::collapsible_if)]
 
 mod app;
+mod curve_generator;
+mod curve_source;
+mod fluid_picker;
+mod fluid_workspace;
+mod input_helper;
 mod pid_editor;
 mod plot_workspace;
 mod project_io;

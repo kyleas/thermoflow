@@ -11,6 +11,7 @@ fn roundtrip_yaml_empty_project() {
         layouts: vec![],
         runs: RunLibraryDef::default(),
         plotting_workspace: None,
+        fluid_workspace: None,
     };
 
     validate_project(&project).unwrap();
@@ -78,6 +79,7 @@ fn roundtrip_yaml_simple_system() {
         layouts: vec![],
         runs: RunLibraryDef::default(),
         plotting_workspace: None,
+        fluid_workspace: None,
     };
 
     validate_project(&project).unwrap();
@@ -130,8 +132,59 @@ fn validation_fails_on_missing_node() {
         layouts: vec![],
         runs: RunLibraryDef::default(),
         plotting_workspace: None,
+        fluid_workspace: None,
     };
 
     let result = validate_project(&project);
     assert!(result.is_err());
+}
+
+#[test]
+fn roundtrip_yaml_fluid_workspace() {
+    use tf_project::schema::{FluidCaseDef, FluidInputPairDef};
+
+    let project = Project {
+        version: 2,
+        name: "Fluid Workspace Project".to_string(),
+        systems: vec![],
+        modules: vec![],
+        layouts: vec![],
+        runs: RunLibraryDef::default(),
+        plotting_workspace: None,
+        fluid_workspace: Some(FluidWorkspaceDef {
+            cases: vec![FluidCaseDef {
+                id: "case1".to_string(),
+                species: "N2O".to_string(),
+                input_pair: FluidInputPairDef::PS,
+                input_1: 101_325.0,
+                input_2: 3900.0,
+                quality: None,
+            }],
+        }),
+    };
+
+    validate_project(&project).unwrap();
+
+    let temp_dir = std::env::temp_dir();
+    let path = temp_dir.join("tf_project_roundtrip_fluid_workspace.yaml");
+
+    save_yaml(&path, &project).unwrap();
+    let loaded = load_yaml(&path).unwrap();
+
+    assert_eq!(project, loaded);
+}
+
+#[test]
+fn load_yaml_without_fluid_workspace_defaults_to_none() {
+    let yaml = r#"
+version: 2
+name: Legacy Project
+systems: []
+modules: []
+layouts: []
+runs: { runs: [] }
+"#;
+
+    let parsed: Project = serde_yaml::from_str(yaml).expect("legacy yaml should deserialize");
+    assert!(parsed.fluid_workspace.is_none());
 }

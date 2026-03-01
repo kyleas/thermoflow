@@ -7,6 +7,7 @@ edition = "2024"
 eframe = { workspace = true }
 egui = { workspace = true }
 egui_plot = { workspace = true }
+egui_extras = { workspace = true }
 egui_graphs = { workspace = true, features = ["events"] }
 egui_graph = { workspace = true }
 egui-file-dialog = { workspace = true }

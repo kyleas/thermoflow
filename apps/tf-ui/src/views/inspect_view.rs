@@ -3,6 +3,7 @@ use tf_project::schema::{
     MeasuredVariableDef, NodeDef, NodeKind, OverlaySettingsDef, Project,
 };
 
+use crate::curve_source::{CurveSource, ValveCharacteristicKind};
 use crate::views::pid_view::PidView;
 
 #[derive(Default)]
@@ -84,21 +85,21 @@ impl InspectView {
         if let (Some(plot_id), Some(plot_ws)) = (active_plot_id, plot_workspace) {
             ui.label("📊 Plot Configuration");
             ui.separator();
-            
+
             if let Some(panel) = plot_ws.panels.get_mut(plot_id) {
                 ui.label(format!("Plot: {}", panel.title));
                 ui.separator();
-                
+
                 ui.label("Series Selection:");
                 ui.separator();
-                
+
                 egui::ScrollArea::vertical()
                     .max_height(400.0)
                     .show(ui, |ui| {
                         self.show_plot_series_editor(ui, panel, project.as_ref());
                     });
             }
-            
+
             ui.separator();
             return actions;
         }
@@ -1157,90 +1158,119 @@ impl InspectView {
         project: Option<&Project>,
     ) {
         let series = &mut panel.series_selection;
-        
+
         if let Some(proj) = project {
             if let Some(system) = proj.systems.first() {
                 // Show node variables with toggles
                 if !system.nodes.is_empty() {
                     ui.label(egui::RichText::new("Node Variables").strong());
                     ui.separator();
-                    
+
                     for node in &system.nodes {
                         ui.label(format!("  {}", node.id));
                         ui.indent(format!("node_{}", node.id), |ui| {
                             // Pressure toggle
-                            let mut has_pressure = series.node_ids_and_variables
+                            let mut has_pressure = series
+                                .node_ids_and_variables
                                 .iter()
                                 .any(|(id, var)| id == &node.id && var == "Pressure");
                             if ui.checkbox(&mut has_pressure, "Pressure (P)").changed() {
                                 if has_pressure {
-                                    series.node_ids_and_variables.push((node.id.clone(), "Pressure".to_string()));
+                                    series
+                                        .node_ids_and_variables
+                                        .push((node.id.clone(), "Pressure".to_string()));
                                 } else {
-                                    series.node_ids_and_variables.retain(|(id, var)| !(id == &node.id && var == "Pressure"));
+                                    series
+                                        .node_ids_and_variables
+                                        .retain(|(id, var)| !(id == &node.id && var == "Pressure"));
                                 }
                             }
-                            
+
                             // Temperature toggle
-                            let mut has_temperature = series.node_ids_and_variables
+                            let mut has_temperature = series
+                                .node_ids_and_variables
                                 .iter()
                                 .any(|(id, var)| id == &node.id && var == "Temperature");
-                            if ui.checkbox(&mut has_temperature, "Temperature (T)").changed() {
+                            if ui
+                                .checkbox(&mut has_temperature, "Temperature (T)")
+                                .changed()
+                            {
                                 if has_temperature {
-                                    series.node_ids_and_variables.push((node.id.clone(), "Temperature".to_string()));
+                                    series
+                                        .node_ids_and_variables
+                                        .push((node.id.clone(), "Temperature".to_string()));
                                 } else {
-                                    series.node_ids_and_variables.retain(|(id, var)| !(id == &node.id && var == "Temperature"));
+                                    series.node_ids_and_variables.retain(|(id, var)| {
+                                        !(id == &node.id && var == "Temperature")
+                                    });
                                 }
                             }
                         });
                     }
                     ui.add_space(8.0);
                 }
-                
+
                 // Show component variables with toggles
                 if !system.components.is_empty() {
                     ui.label(egui::RichText::new("Component Variables").strong());
                     ui.separator();
-                    
+
                     for comp in &system.components {
                         ui.label(format!("  {} ({:?})", comp.id, comp.kind));
                         ui.indent(format!("comp_{}", comp.id), |ui| {
                             // Mass flow toggle
-                            let mut has_mass_flow = series.component_ids_and_variables
+                            let mut has_mass_flow = series
+                                .component_ids_and_variables
                                 .iter()
                                 .any(|(id, var)| id == &comp.id && var == "MassFlow");
                             if ui.checkbox(&mut has_mass_flow, "Mass Flow (ṁ)").changed() {
                                 if has_mass_flow {
-                                    series.component_ids_and_variables.push((comp.id.clone(), "MassFlow".to_string()));
+                                    series
+                                        .component_ids_and_variables
+                                        .push((comp.id.clone(), "MassFlow".to_string()));
                                 } else {
-                                    series.component_ids_and_variables.retain(|(id, var)| !(id == &comp.id && var == "MassFlow"));
+                                    series
+                                        .component_ids_and_variables
+                                        .retain(|(id, var)| !(id == &comp.id && var == "MassFlow"));
                                 }
                             }
-                            
+
                             // Pressure drop toggle
-                            let mut has_pressure_drop = series.component_ids_and_variables
+                            let mut has_pressure_drop = series
+                                .component_ids_and_variables
                                 .iter()
                                 .any(|(id, var)| id == &comp.id && var == "PressureDrop");
-                            if ui.checkbox(&mut has_pressure_drop, "Pressure Drop (ΔP)").changed() {
+                            if ui
+                                .checkbox(&mut has_pressure_drop, "Pressure Drop (ΔP)")
+                                .changed()
+                            {
                                 if has_pressure_drop {
-                                    series.component_ids_and_variables.push((comp.id.clone(), "PressureDrop".to_string()));
+                                    series
+                                        .component_ids_and_variables
+                                        .push((comp.id.clone(), "PressureDrop".to_string()));
                                 } else {
-                                    series.component_ids_and_variables.retain(|(id, var)| !(id == &comp.id && var == "PressureDrop"));
+                                    series.component_ids_and_variables.retain(|(id, var)| {
+                                        !(id == &comp.id && var == "PressureDrop")
+                                    });
                                 }
                             }
                         });
                     }
                     ui.add_space(8.0);
                 }
-                
+
                 // Show control blocks with toggles
                 if let Some(controls) = &system.controls {
                     if !controls.blocks.is_empty() {
                         ui.label(egui::RichText::new("Control Blocks").strong());
                         ui.separator();
-                        
+
                         for ctrl in &controls.blocks {
                             let mut has_control = series.control_ids.contains(&ctrl.id);
-                            if ui.checkbox(&mut has_control, format!("  {}", ctrl.id)).changed() {
+                            if ui
+                                .checkbox(&mut has_control, format!("  {}", ctrl.id))
+                                .changed()
+                            {
                                 if has_control {
                                     series.control_ids.push(ctrl.id.clone());
                                 } else {
@@ -1250,6 +1280,107 @@ impl InspectView {
                         }
                     }
                 }
+
+                // Show arbitrary curves section
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("Arbitrary Curves").strong());
+                ui.separator();
+
+                // List existing arbitrary curves with remove button
+                let mut curve_to_remove: Option<usize> = None;
+                for (idx, curve) in series.arbitrary_curves.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        let label = match curve {
+                            CurveSource::ValveCharacteristic {
+                                component_id,
+                                characteristic,
+                                ..
+                            } => {
+                                let char_str = match characteristic {
+                                    ValveCharacteristicKind::EffectiveArea => "CdA",
+                                    ValveCharacteristicKind::OpeningFactor => "Opening",
+                                };
+                                format!("Valve {}: {}", component_id, char_str)
+                            }
+                            CurveSource::ActuatorResponse { tau_s, .. } => {
+                                format!("Actuator Response (τ={}s)", tau_s)
+                            }
+                            CurveSource::FluidPropertySweep {
+                                x_property,
+                                y_property,
+                                ..
+                            } => {
+                                format!("Fluid: {} vs {}", y_property, x_property)
+                            }
+                        };
+                        ui.label(format!("  {}", label));
+                        if ui.small_button("✖").clicked() {
+                            curve_to_remove = Some(idx);
+                        }
+                    });
+                }
+                if let Some(idx) = curve_to_remove {
+                    series.arbitrary_curves.remove(idx);
+                }
+
+                ui.add_space(4.0);
+
+                // Add new curve UI
+                ui.collapsing("➕ Add Arbitrary Curve", |ui| {
+                    ui.label("Valve Characteristic Curve:");
+                    ui.indent("valve_curve_add", |ui| {
+                        if !system.components.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.label("Valve:");
+                                // Get list of valve components
+                                let valves: Vec<&ComponentDef> = system
+                                    .components
+                                    .iter()
+                                    .filter(|c| matches!(c.kind, ComponentKind::Valve { .. }))
+                                    .collect();
+
+                                if valves.is_empty() {
+                                    ui.label("(No valves in system)");
+                                } else {
+                                    for valve in valves {
+                                        if ui.small_button(&valve.id).clicked() {
+                                            // Add both effective area and opening factor curves
+                                            series.arbitrary_curves.push(
+                                                CurveSource::ValveCharacteristic {
+                                                    component_id: valve.id.clone(),
+                                                    characteristic:
+                                                        ValveCharacteristicKind::EffectiveArea,
+                                                    sample_count: 100,
+                                                },
+                                            );
+                                        }
+                                    }
+                                }
+                            });
+                        } else {
+                            ui.label("(No components available)");
+                        }
+                    });
+
+                    ui.add_space(4.0);
+                    ui.label("Actuator Response Curve:");
+                    ui.indent("actuator_curve_add", |ui| {
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Add Default Actuator").clicked() {
+                                // Add a default actuator response curve
+                                series.arbitrary_curves.push(CurveSource::ActuatorResponse {
+                                    tau_s: 1.0,
+                                    rate_limit_per_s: 1.0,
+                                    initial_position: 0.0,
+                                    command: 1.0,
+                                    duration_s: 5.0,
+                                    sample_count: 100,
+                                });
+                            }
+                        });
+                        ui.label("(Customize parameters in curve list above)");
+                    });
+                });
             } else {
                 ui.label("(No system available)");
             }
