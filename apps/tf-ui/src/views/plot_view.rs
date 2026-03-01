@@ -140,6 +140,29 @@ impl PlotView {
         self.root_container = self.consolidate_container(self.root_container.clone());
     }
 
+    /// Remove a panel from all containers in the tree to prevent duplicates
+    fn remove_panel_globally(container: &mut SplitContainer, panel_id: &str) {
+        match container {
+            SplitContainer::Leaf { panel_ids, active_tab, .. } => {
+                if let Some(idx) = panel_ids.iter().position(|id| id == panel_id) {
+                    panel_ids.remove(idx);
+                    // Adjust active_tab if needed
+                    if *active_tab >= panel_ids.len() && !panel_ids.is_empty() {
+                        *active_tab = panel_ids.len() - 1;
+                    }
+                }
+            }
+            SplitContainer::HSplit { left, right, .. } => {
+                Self::remove_panel_globally(left, panel_id);
+                Self::remove_panel_globally(right, panel_id);
+            }
+            SplitContainer::VSplit { top, bottom, .. } => {
+                Self::remove_panel_globally(top, panel_id);
+                Self::remove_panel_globally(bottom, panel_id);
+            }
+        }
+    }
+
     /// Recursively consolidate empty containers
     fn consolidate_container(&self, container: SplitContainer) -> SplitContainer {
         match container {
@@ -220,35 +243,20 @@ impl PlotView {
 
     /// Apply a drop operation
     fn apply_drop(&mut self, target_container_id: ContainerId, zone: DropZone, panel_id: String) {
-        // Remove panel from source container first
-        if let Some(source_id) = self.dragging_from_container {
-            if source_id != target_container_id {
-                if let Some(container) = Self::find_container_mut(&mut self.root_container, source_id) {
-                    if let SplitContainer::Leaf { panel_ids, active_tab, .. } = container {
-                        if let Some(idx) = panel_ids.iter().position(|id| id == &panel_id) {
-                            panel_ids.remove(idx);
-                            // Adjust active_tab if needed
-                            if *active_tab >= panel_ids.len() && !panel_ids.is_empty() {
-                                *active_tab = panel_ids.len() - 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Remove panel from ALL containers to prevent duplicates
+        Self::remove_panel_globally(&mut self.root_container, &panel_id);
 
         // Handle tab docking (add to container's tabs)
         if zone == DropZone::Tab {
             if let Some(container) = Self::find_container_mut(&mut self.root_container, target_container_id) {
                 if let SplitContainer::Leaf { panel_ids, active_tab, .. } = container {
-                    // Don't add if already in this container
-                    if !panel_ids.contains(&panel_id) {
-                        panel_ids.push(panel_id.clone());
-                        *active_tab = panel_ids.len() - 1;
-                        self.selected_plot_id = Some(panel_id);
-                    }
+                    panel_ids.push(panel_id.clone());
+                    *active_tab = panel_ids.len() - 1;
+                    self.selected_plot_id = Some(panel_id);
                 }
             }
+            // Clean up empty containers after tab docking
+            self.cleanup_empty_containers();
             return;
         }
 

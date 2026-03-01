@@ -1158,125 +1158,103 @@ impl InspectView {
     ) {
         let series = &mut panel.series_selection;
         
-        // Node variables
-        if !series.node_ids_and_variables.is_empty() {
-            ui.horizontal(|ui| {
-                ui.label("Nodes:");
-            });
-            let mut to_remove = Vec::new();
-            for (idx, (node_id, var_name)) in series.node_ids_and_variables.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(format!("  • {} ({})", node_id, var_name));
-                    if ui.button("✕").clicked() {
-                        to_remove.push(idx);
-                    }
-                });
-            }
-            for idx in to_remove.iter().rev() {
-                series.node_ids_and_variables.remove(*idx);
-            }
-            ui.separator();
-        }
-        
-        // Component variables
-        if !series.component_ids_and_variables.is_empty() {
-            ui.horizontal(|ui| {
-                ui.label("Components:");
-            });
-            let mut to_remove = Vec::new();
-            for (idx, (comp_id, var_name)) in series.component_ids_and_variables.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(format!("  • {} ({})", comp_id, var_name));
-                    if ui.button("✕").clicked() {
-                        to_remove.push(idx);
-                    }
-                });
-            }
-            for idx in to_remove.iter().rev() {
-                series.component_ids_and_variables.remove(*idx);
-            }
-            ui.separator();
-        }
-        
-        // Control IDs
-        if !series.control_ids.is_empty() {
-            ui.horizontal(|ui| {
-                ui.label("Controls:");
-            });
-            let mut to_remove = Vec::new();
-            for (idx, ctrl_id) in series.control_ids.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(format!("  • {}", ctrl_id));
-                    if ui.button("✕").clicked() {
-                        to_remove.push(idx);
-                    }
-                });
-            }
-            for idx in to_remove.iter().rev() {
-                series.control_ids.remove(*idx);
-            }
-            ui.separator();
-        }
-        
-        // Show available options to add
         if let Some(proj) = project {
             if let Some(system) = proj.systems.first() {
-                ui.label("Available to plot:");
-                ui.separator();
-                
-                // Available nodes
+                // Show node variables with toggles
                 if !system.nodes.is_empty() {
-                    ui.label("+ Nodes:");
+                    ui.label(egui::RichText::new("Node Variables").strong());
+                    ui.separator();
+                    
                     for node in &system.nodes {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("  {}", node.id));
-                            if ui.button("Add P").clicked() {
-                                series.node_ids_and_variables.push((node.id.clone(), "Pressure".to_string()));
+                        ui.label(format!("  {}", node.id));
+                        ui.indent(format!("node_{}", node.id), |ui| {
+                            // Pressure toggle
+                            let mut has_pressure = series.node_ids_and_variables
+                                .iter()
+                                .any(|(id, var)| id == &node.id && var == "Pressure");
+                            if ui.checkbox(&mut has_pressure, "Pressure (P)").changed() {
+                                if has_pressure {
+                                    series.node_ids_and_variables.push((node.id.clone(), "Pressure".to_string()));
+                                } else {
+                                    series.node_ids_and_variables.retain(|(id, var)| !(id == &node.id && var == "Pressure"));
+                                }
                             }
-                            if ui.button("Add T").clicked() {
-                                series.node_ids_and_variables.push((node.id.clone(), "Temperature".to_string()));
+                            
+                            // Temperature toggle
+                            let mut has_temperature = series.node_ids_and_variables
+                                .iter()
+                                .any(|(id, var)| id == &node.id && var == "Temperature");
+                            if ui.checkbox(&mut has_temperature, "Temperature (T)").changed() {
+                                if has_temperature {
+                                    series.node_ids_and_variables.push((node.id.clone(), "Temperature".to_string()));
+                                } else {
+                                    series.node_ids_and_variables.retain(|(id, var)| !(id == &node.id && var == "Temperature"));
+                                }
                             }
                         });
                     }
-                    ui.separator();
+                    ui.add_space(8.0);
                 }
                 
-                // Available components
+                // Show component variables with toggles
                 if !system.components.is_empty() {
-                    ui.label("+ Components:");
+                    ui.label(egui::RichText::new("Component Variables").strong());
+                    ui.separator();
+                    
                     for comp in &system.components {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("  {} ({:?})", comp.id, comp.kind));
-                            if ui.button("Add ṁ").clicked() {
-                                series.component_ids_and_variables.push((comp.id.clone(), "MassFlow".to_string()));
+                        ui.label(format!("  {} ({:?})", comp.id, comp.kind));
+                        ui.indent(format!("comp_{}", comp.id), |ui| {
+                            // Mass flow toggle
+                            let mut has_mass_flow = series.component_ids_and_variables
+                                .iter()
+                                .any(|(id, var)| id == &comp.id && var == "MassFlow");
+                            if ui.checkbox(&mut has_mass_flow, "Mass Flow (ṁ)").changed() {
+                                if has_mass_flow {
+                                    series.component_ids_and_variables.push((comp.id.clone(), "MassFlow".to_string()));
+                                } else {
+                                    series.component_ids_and_variables.retain(|(id, var)| !(id == &comp.id && var == "MassFlow"));
+                                }
                             }
-                            if ui.button("Add ΔP").clicked() {
-                                series.component_ids_and_variables.push((comp.id.clone(), "PressureDrop".to_string()));
+                            
+                            // Pressure drop toggle
+                            let mut has_pressure_drop = series.component_ids_and_variables
+                                .iter()
+                                .any(|(id, var)| id == &comp.id && var == "PressureDrop");
+                            if ui.checkbox(&mut has_pressure_drop, "Pressure Drop (ΔP)").changed() {
+                                if has_pressure_drop {
+                                    series.component_ids_and_variables.push((comp.id.clone(), "PressureDrop".to_string()));
+                                } else {
+                                    series.component_ids_and_variables.retain(|(id, var)| !(id == &comp.id && var == "PressureDrop"));
+                                }
                             }
                         });
                     }
-                    ui.separator();
+                    ui.add_space(8.0);
                 }
                 
-                // Available control blocks
+                // Show control blocks with toggles
                 if let Some(controls) = &system.controls {
                     if !controls.blocks.is_empty() {
-                        ui.label("+ Controls:");
+                        ui.label(egui::RichText::new("Control Blocks").strong());
+                        ui.separator();
+                        
                         for ctrl in &controls.blocks {
-                            ui.horizontal(|ui| {
-                                ui.label(format!("  {}", ctrl.id));
-                                if ui.button("Add").clicked() {
+                            let mut has_control = series.control_ids.contains(&ctrl.id);
+                            if ui.checkbox(&mut has_control, format!("  {}", ctrl.id)).changed() {
+                                if has_control {
                                     series.control_ids.push(ctrl.id.clone());
+                                } else {
+                                    series.control_ids.retain(|id| id != &ctrl.id);
                                 }
-                            });
+                            }
                         }
                     }
                 }
+            } else {
+                ui.label("(No system available)");
             }
-        } else if series.node_ids_and_variables.is_empty() 
-            && series.component_ids_and_variables.is_empty()
-            && series.control_ids.is_empty() {
-            ui.label("(No series selected - select from project to add)");
+        } else {
+            ui.label("(No project loaded)");
         }
     }
 }
