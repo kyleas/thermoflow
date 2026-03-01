@@ -43,6 +43,7 @@ egui_graphs = "0.21"
 egui_graph = "0.12"
 egui-file-dialog = "0.7"
 petgraph = "0.8"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 tf-core = { path = "crates/tf-core" }
 tf-graph = { path = "crates/tf-graph" }

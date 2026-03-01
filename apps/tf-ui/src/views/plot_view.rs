@@ -74,9 +74,6 @@ pub struct PlotView {
     dragging_panel_id: Option<String>,
     dragging_from_container: Option<ContainerId>,
     drop_target: Option<(ContainerId, DropZone)>,
-    // Series selection overlay
-    show_series_overlay: bool,
-    series_overlay_panel: Option<String>,
 }
 
 impl Default for PlotView {
@@ -96,13 +93,47 @@ impl Default for PlotView {
             dragging_panel_id: None,
             dragging_from_container: None,
             drop_target: None,
-            show_series_overlay: false,
-            series_overlay_panel: None,
         }
     }
 }
 
 impl PlotView {
+    /// Find a container by ID in the tree (read-only)
+    #[allow(dead_code)]
+    fn find_container_ref(
+        container: &SplitContainer,
+        id: ContainerId,
+    ) -> Option<&SplitContainer> {
+        if container.get_id() == id {
+            return Some(container);
+        }
+        match container {
+            SplitContainer::HSplit { left, right, .. } => {
+                Self::find_container_ref(left, id)
+                    .or_else(|| Self::find_container_ref(right, id))
+            }
+            SplitContainer::VSplit { top, bottom, .. } => {
+                Self::find_container_ref(top, id)
+                    .or_else(|| Self::find_container_ref(bottom, id))
+            }
+            SplitContainer::Leaf { .. } => None,
+        }
+    }
+
+    /// Get the currently active plot panel ID
+    #[allow(dead_code)]
+    pub fn get_active_plot_id(&self) -> Option<String> {
+        if let Some(active_id) = self.active_container_id {
+            if let Some(SplitContainer::Leaf { panel_ids, active_tab, .. }) = 
+                Self::find_container_ref(&self.root_container, active_id) {
+                if *active_tab < panel_ids.len() {
+                    return Some(panel_ids[*active_tab].clone());
+                }
+            }
+        }
+        None
+    }
+
     /// Find a container by ID in the tree
     fn find_container_mut(
         container: &mut SplitContainer,
@@ -295,33 +326,7 @@ impl PlotView {
             ui.separator();
         }
 
-        // ===== SERIES SELECTION OVERLAY =====
-        if self.show_series_overlay {
-            if let Some(overlay_panel_id) = &self.series_overlay_panel.clone() {
-                if let Some(panel) = self.workspace.panels.get(overlay_panel_id).cloned() {
-                    egui::Window::new("Add Series")
-                        .collapsible(false)
-                        .resizable(true)
-                        .default_width(400.0)
-                        .show(ui.ctx(), |ui| {
-                            ui.label("Select series to add to this plot:");
-                            ui.separator();
-                            
-                            egui::ScrollArea::vertical()
-                                .max_height(400.0)
-                                .show(ui, |ui| {
-                                    self.show_panel_editor(ui, &panel, overlay_panel_id);
-                                });
-
-                            ui.separator();
-                            if ui.button("Close").clicked() {
-                                self.show_series_overlay = false;
-                                self.series_overlay_panel = None;
-                            }
-                        });
-                }
-            }
-        }
+        // Series selection is now handled in the Inspector panel
 
         // ===== MAIN SPLIT LAYOUT =====
         let available_rect = ui.available_rect_before_wrap();
@@ -511,8 +516,8 @@ impl PlotView {
             }
         }
 
-        // Draw drop zones if dragging
-        if self.dragging_panel_id.is_some() && self.dragging_from_container != Some(container_id) {
+        // Draw drop zones if dragging (always show for current container to allow splitting)
+        if self.dragging_panel_id.is_some() {
             self.draw_drop_zones(ui, container_id, rect);
         }
 
@@ -536,21 +541,10 @@ impl PlotView {
                     ui.painter().text(
                         center,
                         egui::Align2::CENTER_CENTER,
-                        "Click plot to add series",
+                        "Configure series in the Inspector panel →",
                         egui::FontId::proportional(14.0),
                         egui::Color32::GRAY,
                     );
-
-                    // Handle click
-                    let plot_response = ui.interact(
-                        plot_rect,
-                        ui.id().with("plot_hint").with(active_panel_id),
-                        egui::Sense::click(),
-                    );
-                    if plot_response.clicked() {
-                        self.show_series_overlay = true;
-                        self.series_overlay_panel = Some(active_panel_id.clone());
-                    }
                 } else {
                     // Render actual plot
                     let mut plot_ui = ui.new_child(
@@ -705,6 +699,8 @@ impl PlotView {
             self.show_template_manager = true;
         }
     }
+
+    #[allow(dead_code)]
     fn show_panel_editor(&mut self, ui: &mut egui::Ui, panel: &PlotPanel, panel_id: &str) {
         ui.group(|ui| {
             ui.label(format!("Configure: {}", panel.title));

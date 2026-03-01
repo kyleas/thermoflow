@@ -1,17 +1,25 @@
 use egui::{Pos2, Rect};
 use std::collections::HashMap;
 use tf_project::schema::{
-    ComponentKind, ControlBlockDef, ControlBlockKindDef, ControlSystemDef, MeasuredVariableDef,
-    NodeKind, NodeOverlayDef, OverlaySettingsDef, Project,
+    ComponentKind, ControlBlockDef, ControlBlockKindDef, ControlSystemDef, LayoutDef,
+    MeasuredVariableDef, NodeKind, NodeOverlayDef, OverlaySettingsDef, Project, SystemDef,
 };
 use tf_results::{RunStore, TimeseriesRecord};
 
 use crate::pid_editor::{
-    BoxSelection, Clipboard, GRID_SPACING, PidEditorState, PidLayout, autoroute, copy_selection,
-    delete_selection, draw_component_symbol, draw_control_block_symbol, draw_node_symbol,
-    is_orthogonal, normalize_orthogonal, paste_clipboard, snap_to_grid,
+    BoxSelection, Clipboard, CommandHistory, GRID_SPACING, PidEditorState, PidLayout,
+    SnapshotCommand, autoroute, copy_selection, delete_selection, draw_component_symbol,
+    draw_control_block_symbol, draw_node_symbol, is_orthogonal, normalize_orthogonal,
+    paste_clipboard, snap_to_grid,
 };
 use crate::views::{ComponentKindChoice, ControlBlockKindChoice};
+
+#[derive(Clone, Debug)]
+pub enum PaletteItemKind {
+    FluidComponent(ComponentKindChoice),
+    ControlBlock(ControlBlockKindChoice),
+    Node(NodeKind),
+}
 
 pub struct PidView {
     last_system_id: Option<String>,
@@ -38,6 +46,19 @@ pub struct PidView {
     play_speed: f64,
     clipboard: Clipboard,
     paste_sequence: usize,
+    command_history: CommandHistory,
+    drag_before_system: Option<SystemDef>,
+    drag_before_layout: Option<LayoutDef>,
+    drag_before_selection: Option<crate::pid_editor::Selection>,
+    // Camera/viewport state for pan and zoom
+    camera_pan_x: f32,
+    camera_pan_y: f32,
+    camera_zoom: f32,
+    camera_frame_just_loaded: bool,
+    // Insertion palette state
+    insertion_palette_search: String,
+    insertion_palette_active: bool,
+    pending_insertion_kind: Option<PaletteItemKind>,
 }
 
 impl Default for PidView {
@@ -66,6 +87,17 @@ impl Default for PidView {
             play_speed: 1.0,
             clipboard: Clipboard::default(),
             paste_sequence: 0,
+            command_history: CommandHistory::new(),
+            drag_before_system: None,
+            drag_before_layout: None,
+            drag_before_selection: None,
+            camera_pan_x: 0.0,
+            camera_pan_y: 0.0,
+            camera_zoom: 1.0,
+            camera_frame_just_loaded: true,
+            insertion_palette_search: String::new(),
+            insertion_palette_active: false,
+            pending_insertion_kind: None,
         }
     }
 }
@@ -83,6 +115,17 @@ impl PidView {
         self.pending_signal_to_input = None;
         self.selected_control_block_id = None;
         self.selected_signal_connection_index = None;
+        self.command_history.clear();
+        self.drag_before_system = None;
+        self.drag_before_layout = None;
+        self.drag_before_selection = None;
+        self.camera_pan_x = 0.0;
+        self.camera_pan_y = 0.0;
+        self.camera_zoom = 1.0;
+        self.camera_frame_just_loaded = true;
+        self.insertion_palette_search.clear();
+        self.insertion_palette_active = false;
+        self.pending_insertion_kind = None;
     }
 
     pub fn get_node_overlay(&self, node_id: &str) -> Option<&NodeOverlayDef> {
@@ -134,12 +177,47 @@ impl PidView {
         self.paste_sequence = 0;
     }
 
+    fn current_layout_def(&self, system_id: &str) -> LayoutDef {
+        let mut layout_def = LayoutDef {
+            system_id: system_id.to_string(),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            control_blocks: Vec::new(),
+            signal_connections: Vec::new(),
+            overlay: OverlaySettingsDef::default(),
+        };
+        self.layout.apply_to_layout_def(&mut layout_def);
+        for node_layout in &mut layout_def.nodes {
+            node_layout.overlay = self.node_overlays.get(&node_layout.node_id).cloned();
+        }
+        layout_def
+    }
+
     fn paste_from_clipboard(&mut self, project: &mut Project, system_id: &str) -> bool {
+        self.paste_from_clipboard_with_description(project, system_id, "Paste")
+    }
+
+    fn paste_from_clipboard_with_description(
+        &mut self,
+        project: &mut Project,
+        system_id: &str,
+        description: &str,
+    ) -> bool {
         if self.clipboard.is_empty() {
             return false;
         }
 
         self.save_layout(project, system_id);
+
+        let before_system = match project.systems.iter().find(|s| s.id == system_id) {
+            Some(system) => system.clone(),
+            None => return false,
+        };
+        let before_layout = match project.layouts.iter().find(|l| l.system_id == system_id) {
+            Some(layout) => layout.clone(),
+            None => self.current_layout_def(system_id),
+        };
+        let before_selection = self.editor.selection.clone();
 
         self.paste_sequence = self.paste_sequence.saturating_add(1);
         let step = self.paste_sequence as f32;
@@ -154,6 +232,28 @@ impl PidView {
         self.editor.selection = new_selection;
         self.selected_control_block_id = self.selected_control_block_id();
         self.selected_signal_connection_index = None;
+
+        let after_system = match project.systems.iter().find(|s| s.id == system_id) {
+            Some(system) => system.clone(),
+            None => return false,
+        };
+        let after_layout = match project.layouts.iter().find(|l| l.system_id == system_id) {
+            Some(layout) => layout.clone(),
+            None => self.current_layout_def(system_id),
+        };
+        let after_selection = self.editor.selection.clone();
+
+        self.command_history
+            .push_executed(Box::new(SnapshotCommand::new(
+                description.to_string(),
+                before_system,
+                before_layout,
+                before_selection,
+                after_system,
+                after_layout,
+                after_selection,
+            )));
+
         true
     }
 
@@ -163,7 +263,7 @@ impl PidView {
         }
 
         self.save_selection_to_clipboard(project, system_id);
-        self.paste_from_clipboard(project, system_id)
+        self.paste_from_clipboard_with_description(project, system_id, "Duplicate")
     }
 
     fn delete_selected_items(&mut self, project: &mut Project, system_id: &str) -> bool {
@@ -172,9 +272,42 @@ impl PidView {
         }
 
         self.save_layout(project, system_id);
+
+        let before_system = match project.systems.iter().find(|s| s.id == system_id) {
+            Some(system) => system.clone(),
+            None => return false,
+        };
+        let before_layout = match project.layouts.iter().find(|l| l.system_id == system_id) {
+            Some(layout) => layout.clone(),
+            None => self.current_layout_def(system_id),
+        };
+        let before_selection = self.editor.selection.clone();
+
         let _ = delete_selection(project, system_id, &self.editor.selection);
         self.load_layout(project, system_id);
         self.clear_selection();
+
+        let after_system = match project.systems.iter().find(|s| s.id == system_id) {
+            Some(system) => system.clone(),
+            None => return false,
+        };
+        let after_layout = match project.layouts.iter().find(|l| l.system_id == system_id) {
+            Some(layout) => layout.clone(),
+            None => self.current_layout_def(system_id),
+        };
+        let after_selection = self.editor.selection.clone();
+
+        self.command_history
+            .push_executed(Box::new(SnapshotCommand::new(
+                "Delete selection",
+                before_system,
+                before_layout,
+                before_selection,
+                after_system,
+                after_layout,
+                after_selection,
+            )));
+
         true
     }
 
@@ -202,6 +335,8 @@ impl PidView {
 
             // Check if we need to save layout (flag set when dragging stops)
             let mut should_save_layout = false;
+            let mut request_undo = false;
+            let mut request_redo = false;
 
             let shortcuts = ui.input(|input| {
                 (
@@ -209,8 +344,24 @@ impl PidView {
                     input.modifiers.command && input.key_pressed(egui::Key::V),
                     input.modifiers.command && input.key_pressed(egui::Key::D),
                     input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace),
+                    input.modifiers.command
+                        && input.key_pressed(egui::Key::Z)
+                        && !input.modifiers.shift,
+                    (input.modifiers.command && input.key_pressed(egui::Key::Y))
+                        || (input.modifiers.command
+                            && input.modifiers.shift
+                            && input.key_pressed(egui::Key::Z)),
+                    input.key_pressed(egui::Key::Escape),
                 )
             });
+
+            // Handle escape key to cancel insertion mode
+            if shortcuts.6 {
+                if self.pending_insertion_kind.is_some() {
+                    self.pending_insertion_kind = None;
+                    self.pending_from_node = None;
+                }
+            }
 
             if shortcuts.0 {
                 self.save_selection_to_clipboard(proj, sys_id);
@@ -223,6 +374,36 @@ impl PidView {
             }
             if shortcuts.3 && self.delete_selected_items(proj, sys_id) {
                 should_save_layout = true;
+            }
+            if shortcuts.4
+                && self
+                    .command_history
+                    .undo(proj, sys_id, &mut self.editor.selection)
+            {
+                self.load_layout(proj, sys_id);
+                self.selected_control_block_id = self.selected_control_block_id();
+                self.selected_signal_connection_index = self
+                    .editor
+                    .selection
+                    .signal_connections
+                    .iter()
+                    .next()
+                    .copied();
+            }
+            if shortcuts.5
+                && self
+                    .command_history
+                    .redo(proj, sys_id, &mut self.editor.selection)
+            {
+                self.load_layout(proj, sys_id);
+                self.selected_control_block_id = self.selected_control_block_id();
+                self.selected_signal_connection_index = self
+                    .editor
+                    .selection
+                    .signal_connections
+                    .iter()
+                    .next()
+                    .copied();
             }
 
             let system = proj.systems.iter_mut().find(|s| &s.id == sys_id);
@@ -318,6 +499,19 @@ impl PidView {
                 }
 
                 ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(self.command_history.can_undo(), egui::Button::new("Undo"))
+                        .clicked()
+                    {
+                        request_undo = true;
+                    }
+                    if ui
+                        .add_enabled(self.command_history.can_redo(), egui::Button::new("Redo"))
+                        .clicked()
+                    {
+                        request_redo = true;
+                    }
+                    ui.separator();
                     if ui.button("Auto-route").clicked() {
                         self.autoroute_all(system);
                         should_save_layout = true;
@@ -326,8 +520,24 @@ impl PidView {
                         self.snap_all_nodes();
                         should_save_layout = true;
                     }
+                    if ui.button("Frame all").clicked() {
+                        // Frame all will be applied to the current canvas rect
+                        // during drawing, so just set a flag here
+                        self.camera_frame_just_loaded = true;
+                    }
                     ui.checkbox(&mut self.grid_enabled, "Grid");
                     ui.checkbox(&mut self.hide_junction_names, "Hide junction names");
+                    ui.separator();
+                    if ui.button("📋 Quick Add").clicked() {
+                        self.insertion_palette_active = !self.insertion_palette_active;
+                        self.insertion_palette_search.clear();
+                    }
+                    if self.pending_insertion_kind.is_some() {
+                        ui.label("Inserting... (click canvas to place)");
+                        if ui.button("Cancel").clicked() {
+                            self.pending_insertion_kind = None;
+                        }
+                    }
                     ui.separator();
                     ui.label("Add component:");
                     egui::ComboBox::from_id_salt("pid_add_component")
@@ -437,17 +647,54 @@ impl PidView {
                     ui.separator();
                     if let Some(block_id) = self.selected_control_block_id() {
                         if ui.button(format!("Delete Block '{}'", block_id)).clicked() {
+                            let before_system = system.clone();
+                            let before_layout = self.current_layout_def(sys_id);
+                            let before_selection = self.editor.selection.clone();
+
                             self.delete_control_block(system, &block_id);
                             self.editor.selection.remove_control_block(&block_id);
                             self.selected_control_block_id = None;
                             should_save_layout = true;
+
+                            let after_system = system.clone();
+                            let after_layout = self.current_layout_def(sys_id);
+                            let after_selection = self.editor.selection.clone();
+                            self.command_history
+                                .push_executed(Box::new(SnapshotCommand::new(
+                                    "Delete control block",
+                                    before_system,
+                                    before_layout,
+                                    before_selection,
+                                    after_system,
+                                    after_layout,
+                                    after_selection,
+                                )));
                         }
                     }
                     if let Some(idx) = self.selected_signal_connection_index {
                         if ui.button("Delete Signal Wire").clicked() {
+                            let before_system = system.clone();
+                            let before_layout = self.current_layout_def(sys_id);
+                            let before_selection = self.editor.selection.clone();
+
                             self.delete_signal_connection(system, idx);
                             self.selected_signal_connection_index = None;
+                            self.editor.selection.signal_connections.clear();
                             should_save_layout = true;
+
+                            let after_system = system.clone();
+                            let after_layout = self.current_layout_def(sys_id);
+                            let after_selection = self.editor.selection.clone();
+                            self.command_history
+                                .push_executed(Box::new(SnapshotCommand::new(
+                                    "Delete signal wire",
+                                    before_system,
+                                    before_layout,
+                                    before_selection,
+                                    after_system,
+                                    after_layout,
+                                    after_selection,
+                                )));
                         }
                     }
                 });
@@ -499,6 +746,11 @@ impl PidView {
                     }
                 }
 
+                // Show insertion palette if active
+                if self.insertion_palette_active {
+                    self.show_insertion_palette(ui);
+                }
+
                 let (response, painter) =
                     ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
                 let rect = response.rect;
@@ -509,10 +761,61 @@ impl PidView {
 
                 self.ensure_layout(system, rect);
 
+                // Apply frame-all if this is the first draw after loading
+                if self.camera_frame_just_loaded {
+                    self.frame_all(system, rect);
+                    self.camera_frame_just_loaded = false;
+                }
+
                 let pointer = response.interact_pointer_pos();
+                let is_panning = ui.input(|input| {
+                    (response.hovered() && input.pointer.button_down(egui::PointerButton::Middle))
+                        || (response.hovered()
+                            && input.key_down(egui::Key::Space)
+                            && input.pointer.button_down(egui::PointerButton::Primary))
+                });
+
+                if response.hovered() {
+                    let zoom_delta = ui.input(|input| {
+                        let wheel_zoom = if input.smooth_scroll_delta.y.abs() > 0.0 {
+                            1.0 + input.smooth_scroll_delta.y * 0.0015
+                        } else {
+                            1.0
+                        };
+                        wheel_zoom * input.zoom_delta()
+                    });
+
+                    if (zoom_delta - 1.0).abs() > f32::EPSILON {
+                        let old_zoom = self.camera_zoom;
+                        let new_zoom = (old_zoom * zoom_delta).clamp(0.1, 5.0);
+                        if (new_zoom - old_zoom).abs() > f32::EPSILON {
+                            let anchor_screen = pointer.unwrap_or(rect.center());
+                            let anchor_world = self.screen_to_world(anchor_screen, &rect);
+
+                            self.camera_zoom = new_zoom;
+                            self.camera_pan_x =
+                                (anchor_screen.x - rect.left()) - anchor_world.x * new_zoom;
+                            self.camera_pan_y =
+                                (anchor_screen.y - rect.top()) - anchor_world.y * new_zoom;
+                        }
+                    }
+                }
+
+                if is_panning {
+                    let pan_delta = ui.input(|input| input.pointer.delta());
+                    if pan_delta != egui::Vec2::ZERO {
+                        self.camera_pan_x += pan_delta.x;
+                        self.camera_pan_y += pan_delta.y;
+                    }
+                    self.editor.drag_state = None;
+                    self.editor.box_selection = None;
+                }
 
                 if let Some(ref box_sel) = self.editor.box_selection {
-                    let selection_rect = box_sel.rect();
+                    let selection_rect = Rect::from_two_pos(
+                        self.world_to_screen(box_sel.start_pos, &rect),
+                        self.world_to_screen(box_sel.current_pos, &rect),
+                    );
                     painter.rect_filled(
                         selection_rect,
                         0.0,
@@ -525,18 +828,27 @@ impl PidView {
                     );
                 }
 
-                if response.drag_started() {
+                if response.drag_started() && !is_panning {
                     if let Some(pos) = pointer {
+                        let world_pos = self.screen_to_world(pos, &rect);
                         let shift_pressed = ui.input(|input| input.modifiers.shift);
                         // Try to hit test components first (they're smaller and should take priority)
-                        if let Some(comp_id) = self.hit_test_component(system, pos) {
+                        if let Some(comp_id) = self.hit_test_component(system, world_pos) {
                             let already_selected =
                                 self.editor.selection.contains_component(&comp_id);
                             if already_selected && !shift_pressed {
+                                // Multi-selection drag: calculate offset to the component being grabbed
+                                let route = self.layout.edges.get(&comp_id);
+                                let component_pos =
+                                    route.and_then(|r| r.component_pos).unwrap_or_else(|| {
+                                        route
+                                            .map(|r| polyline_midpoint(&r.points))
+                                            .unwrap_or(world_pos)
+                                    });
                                 self.editor.drag_state = Some(crate::pid_editor::DragState {
                                     target: crate::pid_editor::DragTarget::MultiSelection,
-                                    start_pos: pos,
-                                    drag_offset: egui::Vec2::ZERO,
+                                    start_pos: world_pos,
+                                    drag_offset: component_pos - world_pos,
                                     free_move: false,
                                 });
                             } else if let Some(route) = self.layout.edges.get(&comp_id) {
@@ -552,20 +864,27 @@ impl PidView {
                                         component_id: comp_id.clone(),
                                     },
                                     start_pos: component_pos,
-                                    drag_offset: component_pos - pos,
+                                    drag_offset: component_pos - world_pos,
                                     free_move: false,
                                 });
                             }
-                        } else if let Some(block_id) = self.hit_test_control_block(system, pos) {
+                        } else if let Some(block_id) =
+                            self.hit_test_control_block(system, world_pos)
+                        {
                             let already_selected =
                                 self.editor.selection.contains_control_block(&block_id);
                             if already_selected && !shift_pressed {
-                                self.editor.drag_state = Some(crate::pid_editor::DragState {
-                                    target: crate::pid_editor::DragTarget::MultiSelection,
-                                    start_pos: pos,
-                                    drag_offset: egui::Vec2::ZERO,
-                                    free_move: false,
-                                });
+                                // Multi-selection drag: calculate offset to the block being grabbed
+                                if let Some(block_layout) =
+                                    self.layout.control_blocks.get(&block_id)
+                                {
+                                    self.editor.drag_state = Some(crate::pid_editor::DragState {
+                                        target: crate::pid_editor::DragTarget::MultiSelection,
+                                        start_pos: world_pos,
+                                        drag_offset: block_layout.pos - world_pos,
+                                        free_move: false,
+                                    });
+                                }
                             } else if let Some(block_layout) =
                                 self.layout.control_blocks.get(&block_id)
                             {
@@ -578,19 +897,22 @@ impl PidView {
                                         block_id: block_id.clone(),
                                     },
                                     start_pos: block_layout.pos,
-                                    drag_offset: block_layout.pos - pos,
+                                    drag_offset: block_layout.pos - world_pos,
                                     free_move: false,
                                 });
                             }
-                        } else if let Some(node_id) = self.hit_test_node(system, pos) {
+                        } else if let Some(node_id) = self.hit_test_node(system, world_pos) {
                             let already_selected = self.editor.selection.contains_node(&node_id);
                             if already_selected && !shift_pressed {
-                                self.editor.drag_state = Some(crate::pid_editor::DragState {
-                                    target: crate::pid_editor::DragTarget::MultiSelection,
-                                    start_pos: pos,
-                                    drag_offset: egui::Vec2::ZERO,
-                                    free_move: false,
-                                });
+                                // Multi-selection drag: calculate offset to the node being grabbed
+                                if let Some(node_layout) = self.layout.nodes.get(&node_id) {
+                                    self.editor.drag_state = Some(crate::pid_editor::DragState {
+                                        target: crate::pid_editor::DragTarget::MultiSelection,
+                                        start_pos: world_pos,
+                                        drag_offset: node_layout.pos - world_pos,
+                                        free_move: false,
+                                    });
+                                }
                             } else if let Some(node_layout) = self.layout.nodes.get(&node_id) {
                                 if !shift_pressed {
                                     self.editor.selection.clear();
@@ -601,51 +923,55 @@ impl PidView {
                                         node_id: node_id.clone(),
                                     },
                                     start_pos: node_layout.pos,
-                                    drag_offset: node_layout.pos - pos,
+                                    drag_offset: node_layout.pos - world_pos,
                                     free_move: false,
                                 });
                             }
                         } else {
                             self.editor.box_selection = Some(BoxSelection {
-                                start_pos: pos,
-                                current_pos: pos,
+                                start_pos: world_pos,
+                                current_pos: world_pos,
                             });
                             if !shift_pressed {
                                 self.editor.selection.clear();
                             }
                         }
+
+                        if self.editor.drag_state.is_some() {
+                            self.drag_before_system = Some(system.clone());
+                            self.drag_before_layout = Some(self.current_layout_def(sys_id));
+                            self.drag_before_selection = Some(self.editor.selection.clone());
+                        }
                     }
                 }
 
-                if response.dragged() {
+                if response.dragged() && !is_panning {
                     if let (Some(pos), Some(drag_state)) = (pointer, self.editor.drag_state.clone())
                     {
+                        let world_pos = self.screen_to_world(pos, &rect);
                         match &drag_state.target {
                             crate::pid_editor::DragTarget::Node { node_id } => {
-                                let clamped =
-                                    self.constrain_to_rect(pos + drag_state.drag_offset, rect);
+                                let new_pos = world_pos + drag_state.drag_offset;
                                 if let Some(node_layout) = self.layout.nodes.get_mut(node_id) {
-                                    node_layout.pos = clamped;
+                                    node_layout.pos = new_pos;
                                 }
                                 self.update_routes_for_node(system, node_id);
                             }
                             crate::pid_editor::DragTarget::Component { component_id } => {
-                                let next_pos =
-                                    self.constrain_to_rect(pos + drag_state.drag_offset, rect);
+                                let new_pos = world_pos + drag_state.drag_offset;
                                 if let Some(route) = self.layout.edges.get_mut(component_id) {
-                                    route.component_pos = Some(next_pos);
+                                    route.component_pos = Some(new_pos);
                                 }
                                 self.update_routes_for_component(system, component_id);
                             }
                             crate::pid_editor::DragTarget::ControlBlock { block_id } => {
-                                let clamped =
-                                    self.constrain_to_rect(pos + drag_state.drag_offset, rect);
+                                let new_pos = world_pos + drag_state.drag_offset;
                                 if let Some(block) = self.layout.control_blocks.get_mut(block_id) {
-                                    block.pos = clamped;
+                                    block.pos = new_pos;
                                 }
                             }
                             crate::pid_editor::DragTarget::MultiSelection => {
-                                let delta = pos - drag_state.start_pos;
+                                let delta = world_pos - drag_state.start_pos;
                                 if delta != egui::Vec2::ZERO {
                                     let selected_nodes: Vec<String> =
                                         self.editor.selection.nodes.iter().cloned().collect();
@@ -663,18 +989,7 @@ impl PidView {
                                         if let Some(node_layout) =
                                             self.layout.nodes.get_mut(node_id)
                                         {
-                                            let next = node_layout.pos + delta;
-                                            let padding = 20.0;
-                                            node_layout.pos = Pos2::new(
-                                                next.x.clamp(
-                                                    rect.left() + padding,
-                                                    rect.right() - padding,
-                                                ),
-                                                next.y.clamp(
-                                                    rect.top() + padding,
-                                                    rect.bottom() - padding,
-                                                ),
-                                            );
+                                            node_layout.pos += delta;
                                         }
                                     }
                                     for component_id in &selected_components {
@@ -684,36 +999,14 @@ impl PidView {
                                                 route.component_pos.unwrap_or_else(|| {
                                                     polyline_midpoint(&route.points)
                                                 });
-                                            let next = current + delta;
-                                            let padding = 20.0;
-                                            route.component_pos = Some(Pos2::new(
-                                                next.x.clamp(
-                                                    rect.left() + padding,
-                                                    rect.right() - padding,
-                                                ),
-                                                next.y.clamp(
-                                                    rect.top() + padding,
-                                                    rect.bottom() - padding,
-                                                ),
-                                            ));
+                                            route.component_pos = Some(current + delta);
                                         }
                                     }
                                     for block_id in &selected_blocks {
                                         if let Some(block) =
                                             self.layout.control_blocks.get_mut(block_id)
                                         {
-                                            let next = block.pos + delta;
-                                            let padding = 20.0;
-                                            block.pos = Pos2::new(
-                                                next.x.clamp(
-                                                    rect.left() + padding,
-                                                    rect.right() - padding,
-                                                ),
-                                                next.y.clamp(
-                                                    rect.top() + padding,
-                                                    rect.bottom() - padding,
-                                                ),
-                                            );
+                                            block.pos += delta;
                                         }
                                     }
 
@@ -726,21 +1019,22 @@ impl PidView {
 
                                     if let Some(active_drag_state) = self.editor.drag_state.as_mut()
                                     {
-                                        active_drag_state.start_pos = pos;
+                                        active_drag_state.start_pos = world_pos;
                                     }
                                 }
                             }
                         }
                     }
 
-                    if let (Some(pos), Some(box_sel)) =
-                        (pointer, self.editor.box_selection.as_mut())
-                    {
-                        box_sel.current_pos = pos;
+                    if let Some(pos) = pointer {
+                        let pointer_world = self.screen_to_world(pos, &rect);
+                        if let Some(box_sel) = self.editor.box_selection.as_mut() {
+                            box_sel.current_pos = pointer_world;
+                        }
                     }
                 }
 
-                if response.drag_stopped() {
+                if response.drag_stopped() && !is_panning {
                     if let Some(drag_state) = self.editor.drag_state.take() {
                         match &drag_state.target {
                             crate::pid_editor::DragTarget::Node { node_id } => {
@@ -814,6 +1108,34 @@ impl PidView {
                                 }
                             }
                         }
+                        if let (Some(before_system), Some(before_layout), Some(before_selection)) = (
+                            self.drag_before_system.take(),
+                            self.drag_before_layout.take(),
+                            self.drag_before_selection.take(),
+                        ) {
+                            let after_system = system.clone();
+                            let after_layout = self.current_layout_def(sys_id);
+                            let after_selection = self.editor.selection.clone();
+
+                            if before_layout != after_layout {
+                                let description = match drag_state.target {
+                                    crate::pid_editor::DragTarget::MultiSelection => {
+                                        "Move selection"
+                                    }
+                                    _ => "Move",
+                                };
+                                self.command_history
+                                    .push_executed(Box::new(SnapshotCommand::new(
+                                        description,
+                                        before_system,
+                                        before_layout,
+                                        before_selection,
+                                        after_system,
+                                        after_layout,
+                                        after_selection,
+                                    )));
+                            }
+                        }
                         should_save_layout = true;
                     }
 
@@ -855,11 +1177,67 @@ impl PidView {
                     self.selected_control_block_id = self.selected_control_block_id();
                 }
 
-                if response.clicked() {
-                    if let Some(click_pos) = pointer {
+                if response.clicked() && !is_panning {
+                    if let Some(click_pos_screen) = pointer {
+                        let click_pos = self.screen_to_world(click_pos_screen, &rect);
                         let shift_pressed = ui.input(|input| input.modifiers.shift);
-                        // Check if we're placing a control block
-                        if let Some(kind) = self.pending_control_block_kind {
+                        // Check if we're placing from the insertion palette
+                        if let Some(palette_kind) = self.pending_insertion_kind.clone() {
+                            match palette_kind {
+                                PaletteItemKind::ControlBlock(block_kind) => {
+                                    let snapped_pos = if self.grid_enabled {
+                                        snap_to_grid(click_pos)
+                                    } else {
+                                        click_pos
+                                    };
+                                    let new_block_id =
+                                        self.add_control_block(system, block_kind, snapped_pos);
+                                    self.pending_insertion_kind = None;
+                                    if !shift_pressed {
+                                        self.editor.selection.clear();
+                                    }
+                                    self.editor.selection.add_control_block(new_block_id);
+                                    should_save_layout = true;
+                                }
+                                PaletteItemKind::FluidComponent(comp_kind) => {
+                                    // For components, we follow the two-click model
+                                    if let Some(node_id) = self.hit_test_node(system, click_pos) {
+                                        if let Some(from_id) = self.pending_from_node.clone() {
+                                            if from_id != node_id {
+                                                let new_id = self.add_component_between_nodes(
+                                                    system, comp_kind, &from_id, &node_id,
+                                                );
+                                                self.pending_insertion_kind = None;
+                                                self.pending_from_node = None;
+                                                self.editor.selection.clear();
+                                                if let Some(new_component_id) = new_id {
+                                                    self.editor
+                                                        .selection
+                                                        .add_component(new_component_id);
+                                                }
+                                                should_save_layout = true;
+                                            }
+                                        } else {
+                                            self.pending_from_node = Some(node_id.clone());
+                                        }
+                                    }
+                                }
+                                PaletteItemKind::Node(node_kind) => {
+                                    let snapped_pos = if self.grid_enabled {
+                                        snap_to_grid(click_pos)
+                                    } else {
+                                        click_pos
+                                    };
+                                    let new_node_id = self.add_node(system, node_kind, snapped_pos);
+                                    self.pending_insertion_kind = None;
+                                    if !shift_pressed {
+                                        self.editor.selection.clear();
+                                    }
+                                    self.editor.selection.add_node(new_node_id);
+                                    should_save_layout = true;
+                                }
+                            }
+                        } else if let Some(kind) = self.pending_control_block_kind {
                             // Place control block at click position
                             let snapped_pos = if self.grid_enabled {
                                 snap_to_grid(click_pos)
@@ -969,7 +1347,21 @@ impl PidView {
                 }
 
                 for component in &system.components {
-                    let selected = self.editor.selection.contains_component(&component.id);
+                    let box_hovered = self
+                        .editor
+                        .box_selection
+                        .as_ref()
+                        .and_then(|box_sel| {
+                            self.layout.edges.get(&component.id).map(|route| {
+                                let component_pos = route
+                                    .component_pos
+                                    .unwrap_or_else(|| polyline_midpoint(&route.points));
+                                box_sel.rect().contains(component_pos)
+                            })
+                        })
+                        .unwrap_or(false);
+                    let selected =
+                        self.editor.selection.contains_component(&component.id) || box_hovered;
                     let color = if selected {
                         egui::Color32::YELLOW
                     } else {
@@ -981,14 +1373,34 @@ impl PidView {
                             route.points = normalize_orthogonal(&route.points);
                         }
 
-                        draw_route(&painter, route, color);
-
-                        // Use component position if set, otherwise use midpoint
-                        let component_pos = route
+                        // Extract data we need before transforming (to avoid borrow issues)
+                        let points_world = route.points.clone();
+                        let component_pos_world = route
                             .component_pos
                             .unwrap_or_else(|| polyline_midpoint(&route.points));
+                        let label_offset = route.label_offset;
 
-                        draw_component_symbol(&painter, &component.kind, component_pos, color);
+                        // Now we can transform without holding the mutable borrow
+                        let screen_points: Vec<Pos2> = points_world
+                            .iter()
+                            .map(|&p| self.world_to_screen(p, &rect))
+                            .collect();
+                        for segment in screen_points.windows(2) {
+                            painter.line_segment(
+                                [segment[0], segment[1]],
+                                egui::Stroke::new(2.0, color),
+                            );
+                        }
+
+                        let component_pos_screen = self.world_to_screen(component_pos_world, &rect);
+
+                        draw_component_symbol(
+                            &painter,
+                            &component.kind,
+                            component_pos_screen,
+                            color,
+                            self.camera_zoom,
+                        );
 
                         if let Some(ref data) = run_data {
                             if overlay.show_mass_flow {
@@ -1000,10 +1412,10 @@ impl PidView {
                                     if let Some(mdot) = edge.mdot_kg_s {
                                         let text = format!("{:.3} kg/s", mdot);
                                         painter.text(
-                                            component_pos + egui::vec2(6.0, -18.0),
+                                            component_pos_screen + egui::vec2(6.0, -18.0),
                                             egui::Align2::LEFT_TOP,
                                             text,
-                                            egui::FontId::proportional(10.0),
+                                            egui::FontId::proportional(10.0 * self.camera_zoom),
                                             egui::Color32::LIGHT_BLUE,
                                         );
                                     }
@@ -1011,20 +1423,28 @@ impl PidView {
                             }
                         }
 
+                        let label_pos_world = component_pos_world + label_offset;
+                        let label_pos_screen = self.world_to_screen(label_pos_world, &rect);
                         painter.text(
-                            component_pos + route.label_offset + egui::vec2(6.0, 10.0),
+                            label_pos_screen + egui::vec2(6.0, 10.0),
                             egui::Align2::LEFT_TOP,
                             &component.name,
-                            egui::FontId::proportional(10.0),
+                            egui::FontId::proportional(10.0 * self.camera_zoom),
                             egui::Color32::WHITE,
                         );
                     }
                 }
 
-                let node_radius = 18.0;
+                let node_radius = 18.0 * self.camera_zoom;
                 for node in &system.nodes {
                     if let Some(node_layout) = self.layout.nodes.get(&node.id) {
-                        let selected = self.editor.selection.contains_node(&node.id);
+                        let box_hovered = self
+                            .editor
+                            .box_selection
+                            .as_ref()
+                            .map(|box_sel| box_sel.rect().contains(node_layout.pos))
+                            .unwrap_or(false);
+                        let selected = self.editor.selection.contains_node(&node.id) || box_hovered;
                         let color = if selected {
                             egui::Color32::YELLOW
                         } else {
@@ -1033,10 +1453,11 @@ impl PidView {
 
                         let is_boundary = system.boundaries.iter().any(|b| b.node_id == node.id)
                             || matches!(node.kind, NodeKind::Atmosphere { .. });
+                        let node_pos_screen = self.world_to_screen(node_layout.pos, &rect);
                         draw_node_symbol(
                             &painter,
                             &node.kind,
-                            node_layout.pos,
+                            node_pos_screen,
                             node_radius,
                             color,
                             is_boundary,
@@ -1046,13 +1467,13 @@ impl PidView {
                         let should_show_name =
                             !(self.hide_junction_names && matches!(node.kind, NodeKind::Junction));
                         if should_show_name {
+                            let label_pos_world = node_layout.pos + node_layout.label_offset;
+                            let label_pos_screen = self.world_to_screen(label_pos_world, &rect);
                             painter.text(
-                                node_layout.pos
-                                    + node_layout.label_offset
-                                    + egui::vec2(0.0, node_radius + 6.0),
+                                label_pos_screen + egui::vec2(0.0, node_radius + 6.0),
                                 egui::Align2::CENTER_TOP,
                                 &node.name,
-                                egui::FontId::proportional(12.0),
+                                egui::FontId::proportional(12.0 * self.camera_zoom),
                                 egui::Color32::WHITE,
                             );
                         }
@@ -1099,7 +1520,9 @@ impl PidView {
 
                                 if !overlay_text.is_empty() {
                                     let text = overlay_text.join("\n");
-                                    let mut text_pos = node_layout.pos
+                                    let node_pos_screen =
+                                        self.world_to_screen(node_layout.pos, &rect);
+                                    let mut text_pos = node_pos_screen
                                         + egui::vec2(node_radius + 6.0, -node_radius);
                                     text_pos.x =
                                         text_pos.x.clamp(rect.left() + 4.0, rect.right() - 4.0);
@@ -1109,7 +1532,7 @@ impl PidView {
                                         text_pos,
                                         egui::Align2::LEFT_CENTER,
                                         text,
-                                        egui::FontId::proportional(9.0),
+                                        egui::FontId::proportional(9.0 * self.camera_zoom),
                                         egui::Color32::LIGHT_GREEN,
                                     );
                                 }
@@ -1134,8 +1557,10 @@ impl PidView {
                             }; // Green for signals
 
                             for i in 0..signal_conn.points.len() - 1 {
-                                let from = signal_conn.points[i];
-                                let to = signal_conn.points[i + 1];
+                                let from_world = signal_conn.points[i];
+                                let to_world = signal_conn.points[i + 1];
+                                let from = self.world_to_screen(from_world, &rect);
+                                let to = self.world_to_screen(to_world, &rect);
 
                                 // Draw dashed line
                                 let dash_length = 8.0;
@@ -1161,10 +1586,12 @@ impl PidView {
                             }
 
                             // Draw arrow at the end
-                            if let (Some(&from), Some(&to)) = (
+                            if let (Some(&from_world), Some(&to_world)) = (
                                 signal_conn.points.get(signal_conn.points.len() - 2),
                                 signal_conn.points.last(),
                             ) {
+                                let from = self.world_to_screen(from_world, &rect);
+                                let to = self.world_to_screen(to_world, &rect);
                                 let dir = (to - from).normalized();
                                 let arrow_size = 8.0;
                                 let arrow_angle = std::f32::consts::PI / 6.0; // 30 degrees
@@ -1190,35 +1617,147 @@ impl PidView {
                     // Then render blocks on top
                     for block in &controls.blocks {
                         if let Some(block_layout) = self.layout.control_blocks.get(&block.id) {
-                            let selected = self.editor.selection.contains_control_block(&block.id);
+                            let box_hovered = self
+                                .editor
+                                .box_selection
+                                .as_ref()
+                                .map(|box_sel| box_sel.rect().contains(block_layout.pos))
+                                .unwrap_or(false);
+                            let selected = self.editor.selection.contains_control_block(&block.id)
+                                || box_hovered;
                             let color = if selected {
                                 egui::Color32::YELLOW
                             } else {
                                 egui::Color32::from_rgb(150, 200, 255) // Light cyan for control blocks
                             };
 
+                            let block_pos_screen = self.world_to_screen(block_layout.pos, &rect);
                             draw_control_block_symbol(
                                 &painter,
                                 &block.kind,
-                                block_layout.pos,
+                                block_pos_screen,
                                 color,
+                                self.camera_zoom,
                             );
 
                             // Draw block name
+                            let label_pos_world = block_layout.pos + block_layout.label_offset;
+                            let label_pos_screen = self.world_to_screen(label_pos_world, &rect);
+                            // Control blocks are 28px tall (half_h=14), so offset by 14 + 10 = 24
+                            let block_half_height = 14.0 * self.camera_zoom;
                             painter.text(
-                                block_layout.pos
-                                    + block_layout.label_offset
-                                    + egui::vec2(0.0, 24.0),
+                                label_pos_screen + egui::vec2(0.0, block_half_height + 10.0),
                                 egui::Align2::CENTER_TOP,
                                 &block.name,
-                                egui::FontId::proportional(10.0),
+                                egui::FontId::proportional(10.0 * self.camera_zoom),
                                 egui::Color32::WHITE,
                             );
                         }
                     }
                 }
+
+                // Draw insertion preview if in insertion mode
+                if let (Some(palette_kind), Some(pointer_pos)) =
+                    (&self.pending_insertion_kind, pointer)
+                {
+                    let world_pos = self.screen_to_world(pointer_pos, &rect);
+                    let snapped_world_pos = if self.grid_enabled {
+                        snap_to_grid(world_pos)
+                    } else {
+                        world_pos
+                    };
+                    let preview_screen_pos = self.world_to_screen(snapped_world_pos, &rect);
+
+                    // Draw semi-transparent preview based on item type
+                    match palette_kind {
+                        PaletteItemKind::Node(node_kind) => {
+                            let preview_color = egui::Color32::from_rgba_unmultiplied(
+                                120, 255, 120, 150, // Semi-transparent green
+                            );
+                            draw_node_symbol(
+                                &painter,
+                                node_kind,
+                                preview_screen_pos,
+                                18.0 * self.camera_zoom,
+                                preview_color,
+                                false,
+                            );
+                        }
+                        PaletteItemKind::ControlBlock(block_kind) => {
+                            let preview_color = egui::Color32::from_rgba_unmultiplied(
+                                150, 200, 255, 150, // Semi-transparent cyan
+                            );
+                            draw_control_block_symbol(
+                                &painter,
+                                &default_control_block_kind(*block_kind, system),
+                                preview_screen_pos,
+                                preview_color,
+                                self.camera_zoom,
+                            );
+                        }
+                        PaletteItemKind::FluidComponent(comp_kind) => {
+                            // For components, show preview only if we have a start node selected
+                            if let Some(from_node_id) = &self.pending_from_node {
+                                if let Some(from_pos) = self.node_pos(from_node_id) {
+                                    let from_screen = self.world_to_screen(from_pos, &rect);
+                                    // Draw line from start node to cursor
+                                    painter.line_segment(
+                                        [from_screen, preview_screen_pos],
+                                        egui::Stroke::new(
+                                            2.0,
+                                            egui::Color32::from_rgba_unmultiplied(
+                                                200, 200, 200, 150,
+                                            ),
+                                        ),
+                                    );
+                                    // Draw component symbol at cursor
+                                    let preview_color =
+                                        egui::Color32::from_rgba_unmultiplied(200, 200, 200, 150);
+                                    draw_component_symbol(
+                                        &painter,
+                                        &default_component_kind(*comp_kind),
+                                        preview_screen_pos,
+                                        preview_color,
+                                        self.camera_zoom,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             } else {
                 ui.label("Selected system not found");
+            }
+
+            if request_undo
+                && self
+                    .command_history
+                    .undo(proj, sys_id, &mut self.editor.selection)
+            {
+                self.load_layout(proj, sys_id);
+                self.selected_control_block_id = self.selected_control_block_id();
+                self.selected_signal_connection_index = self
+                    .editor
+                    .selection
+                    .signal_connections
+                    .iter()
+                    .next()
+                    .copied();
+            }
+            if request_redo
+                && self
+                    .command_history
+                    .redo(proj, sys_id, &mut self.editor.selection)
+            {
+                self.load_layout(proj, sys_id);
+                self.selected_control_block_id = self.selected_control_block_id();
+                self.selected_signal_connection_index = self
+                    .editor
+                    .selection
+                    .signal_connections
+                    .iter()
+                    .next()
+                    .copied();
             }
 
             // Save layout if needed (after system borrow is dropped)
@@ -1235,6 +1774,7 @@ impl PidView {
     fn load_layout(&mut self, project: &Project, system_id: &str) {
         self.layout = PidLayout::default();
         self.node_overlays.clear();
+        self.camera_frame_just_loaded = true;
 
         if let Some(layout) = project.layouts.iter().find(|l| l.system_id == system_id) {
             self.layout = PidLayout::from_layout_def(layout);
@@ -1392,6 +1932,7 @@ impl PidView {
         }
     }
 
+    #[allow(dead_code)]
     fn constrain_to_rect(&self, pos: Pos2, rect: Rect) -> Pos2 {
         let padding = 20.0;
         Pos2::new(
@@ -1402,22 +1943,44 @@ impl PidView {
 
     fn draw_grid(&self, painter: &egui::Painter, rect: Rect) {
         let color = egui::Color32::from_gray(40);
-        let mut x = rect.left() - (rect.left() % GRID_SPACING);
-        while x < rect.right() {
+
+        let top_left_world = self.screen_to_world(rect.left_top(), &rect);
+        let bottom_right_world = self.screen_to_world(rect.right_bottom(), &rect);
+
+        let world_min_x = top_left_world.x.min(bottom_right_world.x);
+        let world_max_x = top_left_world.x.max(bottom_right_world.x);
+        let world_min_y = top_left_world.y.min(bottom_right_world.y);
+        let world_max_y = top_left_world.y.max(bottom_right_world.y);
+
+        let spacing_screen = GRID_SPACING * self.camera_zoom;
+        let min_pixels = 10.0;
+        let step_multiplier = if spacing_screen > 0.0 {
+            (min_pixels / spacing_screen).ceil().max(1.0)
+        } else {
+            1.0
+        };
+        let world_step = GRID_SPACING * step_multiplier;
+
+        let mut x = (world_min_x / world_step).floor() * world_step;
+        while x <= world_max_x {
+            let a = self.world_to_screen(Pos2::new(x, world_min_y), &rect);
+            let b = self.world_to_screen(Pos2::new(x, world_max_y), &rect);
             painter.line_segment(
-                [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+                [Pos2::new(a.x, rect.top()), Pos2::new(b.x, rect.bottom())],
                 egui::Stroke::new(1.0, color),
             );
-            x += GRID_SPACING;
+            x += world_step;
         }
 
-        let mut y = rect.top() - (rect.top() % GRID_SPACING);
-        while y < rect.bottom() {
+        let mut y = (world_min_y / world_step).floor() * world_step;
+        while y <= world_max_y {
+            let a = self.world_to_screen(Pos2::new(world_min_x, y), &rect);
+            let b = self.world_to_screen(Pos2::new(world_max_x, y), &rect);
             painter.line_segment(
-                [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+                [Pos2::new(rect.left(), a.y), Pos2::new(rect.right(), b.y)],
                 egui::Stroke::new(1.0, color),
             );
-            y += GRID_SPACING;
+            y += world_step;
         }
     }
 
@@ -1657,6 +2220,27 @@ impl PidView {
         new_id
     }
 
+    fn add_node(
+        &mut self,
+        system: &mut tf_project::schema::SystemDef,
+        kind: NodeKind,
+        pos: Pos2,
+    ) -> String {
+        let new_id = next_id("n", system.nodes.iter().map(|n| &n.id));
+        let name = format!("{} {}", node_kind_label(&kind), system.nodes.len() + 1);
+
+        system.nodes.push(tf_project::schema::NodeDef {
+            id: new_id.clone(),
+            name,
+            kind,
+        });
+
+        // Add to layout
+        self.layout.ensure_node(&new_id, pos);
+
+        new_id
+    }
+
     fn add_signal_connection(
         &mut self,
         system: &mut tf_project::schema::SystemDef,
@@ -1751,6 +2335,236 @@ impl PidView {
             self.layout.signal_connections.remove(index);
         }
     }
+
+    /// Calculate the bounding box of all nodes, components, and control blocks.
+    /// Returns (min_x, min_y, max_x, max_y), or (0, 0, 0, 0) if nothing is present.
+    fn compute_content_bounds(
+        &self,
+        system: &tf_project::schema::SystemDef,
+    ) -> (f32, f32, f32, f32) {
+        const NODE_SIZE: f32 = 20.0;
+        const COMPONENT_SIZE: f32 = 16.0;
+        const BLOCK_SIZE: f32 = 40.0;
+
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        let mut has_content = false;
+
+        // Check nodes
+        for node in &system.nodes {
+            if let Some(node_layout) = self.layout.nodes.get(&node.id) {
+                let pos = node_layout.pos;
+                min_x = min_x.min(pos.x - NODE_SIZE);
+                min_y = min_y.min(pos.y - NODE_SIZE);
+                max_x = max_x.max(pos.x + NODE_SIZE);
+                max_y = max_y.max(pos.y + NODE_SIZE);
+                has_content = true;
+            }
+        }
+
+        // Check components
+        for component in &system.components {
+            if let Some(route) = self.layout.edges.get(&component.id) {
+                for point in &route.points {
+                    min_x = min_x.min(point.x - COMPONENT_SIZE);
+                    min_y = min_y.min(point.y - COMPONENT_SIZE);
+                    max_x = max_x.max(point.x + COMPONENT_SIZE);
+                    max_y = max_y.max(point.y + COMPONENT_SIZE);
+                    has_content = true;
+                }
+            }
+        }
+
+        // Check control blocks
+        if let Some(ref controls) = system.controls {
+            for block in &controls.blocks {
+                if let Some(block_layout) = self.layout.control_blocks.get(&block.id) {
+                    let pos = block_layout.pos;
+                    min_x = min_x.min(pos.x - BLOCK_SIZE);
+                    min_y = min_y.min(pos.y - BLOCK_SIZE);
+                    max_x = max_x.max(pos.x + BLOCK_SIZE);
+                    max_y = max_y.max(pos.y + BLOCK_SIZE);
+                    has_content = true;
+                }
+            }
+        }
+
+        if has_content {
+            (min_x, min_y, max_x, max_y)
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        }
+    }
+
+    /// Adjust camera pan and zoom to fit all content in the viewport.
+    /// Call this after loading a layout or when the user requests fit-all.
+    fn frame_all(&mut self, system: &tf_project::schema::SystemDef, viewport_rect: Rect) {
+        let (min_x, min_y, max_x, max_y) = self.compute_content_bounds(system);
+
+        // If there's no content, reset to zero
+        if min_x == f32::MAX {
+            self.camera_pan_x = 0.0;
+            self.camera_pan_y = 0.0;
+            self.camera_zoom = 1.0;
+            return;
+        }
+
+        let content_width = max_x - min_x;
+        let content_height = max_y - min_y;
+
+        // Add padding (margins around the content)
+        const MARGIN: f32 = 50.0;
+        let padded_width = content_width + 2.0 * MARGIN;
+        let padded_height = content_height + 2.0 * MARGIN;
+
+        // Calculate zoom to fit content in viewport
+        let viewport_width = viewport_rect.width();
+        let viewport_height = viewport_rect.height();
+
+        let zoom_x = viewport_width / padded_width;
+        let zoom_y = viewport_height / padded_height;
+        let new_zoom = zoom_x.min(zoom_y).clamp(0.1, 5.0);
+
+        // Calculate pan to center the content
+        // Use rect-relative coordinates (0,0 = top-left of canvas)
+        let content_center_x = (min_x + max_x) * 0.5;
+        let content_center_y = (min_y + max_y) * 0.5;
+
+        let viewport_center_x = viewport_width * 0.5;
+        let viewport_center_y = viewport_height * 0.5;
+
+        self.camera_zoom = new_zoom;
+        self.camera_pan_x = viewport_center_x - content_center_x * new_zoom;
+        self.camera_pan_y = viewport_center_y - content_center_y * new_zoom;
+    }
+
+    fn show_insertion_palette(&mut self, ui: &mut egui::Ui) {
+        let mut palette_open = self.insertion_palette_active;
+
+        egui::Window::new("Quick Add")
+            .open(&mut palette_open)
+            .default_size([300.0, 400.0])
+            .vscroll(true)
+            .show(ui.ctx(), |ui| {
+                // Search box
+                ui.label("Search:");
+                ui.text_edit_singleline(&mut self.insertion_palette_search);
+
+                ui.separator();
+
+                // Collect available items
+                let mut items: Vec<(String, PaletteItemKind)> = Vec::new();
+
+                // Fluid components
+                let component_kinds = vec![
+                    (ComponentKindChoice::Orifice, "Orifice"),
+                    (ComponentKindChoice::Valve, "Valve"),
+                    (ComponentKindChoice::Pipe, "Pipe"),
+                    (ComponentKindChoice::Pump, "Pump"),
+                    (ComponentKindChoice::Turbine, "Turbine"),
+                ];
+
+                for (kind, name) in component_kinds {
+                    items.push((
+                        format!("Component: {}", name),
+                        PaletteItemKind::FluidComponent(kind),
+                    ));
+                }
+
+                // Control blocks
+                let block_kinds = vec![
+                    (ControlBlockKindChoice::Constant, "Constant"),
+                    (
+                        ControlBlockKindChoice::MeasuredVariable,
+                        "Measured Variable",
+                    ),
+                    (ControlBlockKindChoice::PIController, "PI Controller"),
+                    (ControlBlockKindChoice::PIDController, "PID Controller"),
+                    (ControlBlockKindChoice::FirstOrderActuator, "Actuator"),
+                    (ControlBlockKindChoice::ActuatorCommand, "Command"),
+                ];
+
+                for (kind, name) in block_kinds {
+                    items.push((
+                        format!("Control Block: {}", name),
+                        PaletteItemKind::ControlBlock(kind),
+                    ));
+                }
+
+                // Nodes
+                let node_kinds = vec![
+                    (NodeKind::Junction, "Junction"),
+                    (
+                        NodeKind::ControlVolume {
+                            volume_m3: 1.0,
+                            initial: Default::default(),
+                        },
+                        "Control Volume",
+                    ),
+                    (
+                        NodeKind::Atmosphere {
+                            pressure_pa: 101325.0,
+                            temperature_k: 288.15,
+                        },
+                        "Atmosphere",
+                    ),
+                ];
+
+                for (kind, name) in node_kinds {
+                    items.push((format!("Node: {}", name), PaletteItemKind::Node(kind)));
+                }
+
+                // Filter items by search
+                let search_lower = self.insertion_palette_search.to_lowercase();
+                let filtered: Vec<_> = items
+                    .into_iter()
+                    .filter(|(label, _)| label.to_lowercase().contains(&search_lower))
+                    .collect();
+
+                // Display palette items
+                for (label, kind) in &filtered {
+                    if ui.button(label).clicked() {
+                        self.pending_insertion_kind = Some(kind.clone());
+                    }
+                }
+
+                if filtered.is_empty() && !self.insertion_palette_search.is_empty() {
+                    ui.label("No items found");
+                }
+            });
+
+        // Close palette if an item was selected
+        if self.pending_insertion_kind.is_some() {
+            palette_open = false;
+        }
+        self.insertion_palette_active = palette_open;
+    }
+
+    /// Convert world coordinates to screen coordinates using the camera transform.
+    #[allow(dead_code)]
+    /// Convert world coordinates to screen coordinates using the camera transform.
+    /// The rect parameter is used to convert from rect-relative to absolute coordinates.
+    fn world_to_screen(&self, world_pos: Pos2, rect: &Rect) -> Pos2 {
+        Pos2::new(
+            world_pos.x * self.camera_zoom + self.camera_pan_x + rect.left(),
+            world_pos.y * self.camera_zoom + self.camera_pan_y + rect.top(),
+        )
+    }
+
+    /// Convert screen coordinates to world coordinates using the inverse camera transform.
+    /// The rect parameter is used to convert from absolute to rect-relative coordinates.
+    fn screen_to_world(&self, screen_pos: Pos2, rect: &Rect) -> Pos2 {
+        if self.camera_zoom > 0.0 {
+            Pos2::new(
+                (screen_pos.x - rect.left() - self.camera_pan_x) / self.camera_zoom,
+                (screen_pos.y - rect.top() - self.camera_pan_y) / self.camera_zoom,
+            )
+        } else {
+            Pos2::ZERO
+        }
+    }
 }
 
 fn pick_record_at_time(records: &[TimeseriesRecord], time_s: f64) -> Option<&TimeseriesRecord> {
@@ -1805,18 +2619,6 @@ fn distance_to_polyline(point: Pos2, points: &[Pos2]) -> f32 {
     }
 
     min_dist
-}
-
-fn draw_route(
-    painter: &egui::Painter,
-    route: &crate::pid_editor::PidEdgeRoute,
-    color: egui::Color32,
-) {
-    for segment in route.points.windows(2) {
-        let a = segment[0];
-        let b = segment[1];
-        painter.line_segment([a, b], egui::Stroke::new(2.0, color));
-    }
 }
 
 fn polyline_midpoint(points: &[Pos2]) -> Pos2 {
@@ -1874,6 +2676,14 @@ fn control_block_kind_label(kind: ControlBlockKindChoice) -> &'static str {
         ControlBlockKindChoice::PIDController => "PID Controller",
         ControlBlockKindChoice::FirstOrderActuator => "Actuator",
         ControlBlockKindChoice::ActuatorCommand => "Actuator Cmd",
+    }
+}
+
+fn node_kind_label(kind: &NodeKind) -> &'static str {
+    match kind {
+        NodeKind::Junction => "Junction",
+        NodeKind::ControlVolume { .. } => "Control Volume",
+        NodeKind::Atmosphere { .. } => "Atmosphere",
     }
 }
 

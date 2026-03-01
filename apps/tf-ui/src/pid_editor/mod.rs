@@ -6,7 +6,9 @@ pub mod model;
 pub mod routing;
 pub mod symbols;
 
-pub use commands::{Clipboard, copy_selection, delete_selection, paste_clipboard};
+pub use commands::{
+    Clipboard, CommandHistory, SnapshotCommand, copy_selection, delete_selection, paste_clipboard,
+};
 pub use model::*;
 pub use routing::{autoroute, is_orthogonal, normalize_orthogonal};
 pub use symbols::*;

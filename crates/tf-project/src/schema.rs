@@ -14,6 +14,8 @@ pub struct Project {
     pub layouts: Vec<LayoutDef>,
     #[serde(default)]
     pub runs: RunLibraryDef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plotting_workspace: Option<PlottingWorkspaceDef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -412,4 +414,87 @@ pub struct RunMetadataDef {
 pub enum RunTypeDef {
     Steady,
     Transient { dt_s: f64, t_end_s: f64 },
+}
+
+/// Persistent plotting workspace configuration.
+/// Stores all plot panels, their positions, sizes, and series selections.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct PlottingWorkspaceDef {
+    #[serde(default)]
+    pub panels: Vec<PlotPanelDef>,
+    #[serde(default)]
+    pub templates: Vec<PlotTemplateDef>,
+    /// Width of the plot workspace area in pixels
+    #[serde(default)]
+    pub workspace_width: f32,
+    /// Height of the plot workspace area in pixels
+    #[serde(default)]
+    pub workspace_height: f32,
+}
+
+/// A single plot panel in the workspace.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlotPanelDef {
+    /// Unique identifier for the panel
+    pub id: String,
+    /// User-defined name/title for the plot
+    pub title: String,
+    /// X position in the workspace (in pixels)
+    pub x: f32,
+    /// Y position in the workspace (in pixels)
+    pub y: f32,
+    /// Width of the panel (in pixels)
+    pub width: f32,
+    /// Height of the panel (in pixels)
+    pub height: f32,
+    /// Which run this plot is displaying data from
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// Series selection for this plot
+    pub series_selection: PlotSeriesSelectionDef,
+}
+
+/// Specifies which series are shown in a plot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct PlotSeriesSelectionDef {
+    #[serde(default)]
+    pub node_ids_and_variables: Vec<NodePlotVariableDef>,
+    #[serde(default)]
+    pub component_ids_and_variables: Vec<ComponentPlotVariableDef>,
+    #[serde(default)]
+    pub control_ids: Vec<String>,
+}
+
+/// A node series to plot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NodePlotVariableDef {
+    pub node_id: String,
+    pub variable: String, // "Pressure", "Temperature", "Enthalpy", "Density"
+}
+
+/// A component series to plot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ComponentPlotVariableDef {
+    pub component_id: String,
+    pub variable: String, // "MassFlow", "PressureDrop"
+}
+
+/// A reusable plot template/preset.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlotTemplateDef {
+    /// Unique identifier for the template
+    pub id: String,
+    /// User-defined name for the template
+    pub name: String,
+    /// Optional description
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Series selection that this template defines
+    pub series_selection: PlotSeriesSelectionDef,
+    /// Default width for plots created from this template
+    #[serde(default)]
+    pub default_width: f32,
+    /// Default height for plots created from this template
+    #[serde(default)]
+    pub default_height: f32,
 }

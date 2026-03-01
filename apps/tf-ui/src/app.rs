@@ -39,6 +39,8 @@ pub struct ThermoflowApp {
     system_runtime: Option<SystemRuntime>,
     transient_dt_s: f64,
     transient_t_end_s: f64,
+    smoke_test_mode: bool,
+    smoke_test_frames_rendered: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -84,7 +86,13 @@ impl ThermoflowApp {
             system_runtime: None,
             transient_dt_s: 0.01,
             transient_t_end_s: 1.0,
+            smoke_test_mode: false,
+            smoke_test_frames_rendered: 0,
         }
+    }
+
+    pub fn set_smoke_test_mode(&mut self, enabled: bool) {
+        self.smoke_test_mode = enabled;
     }
 
     fn init_run_store(&mut self) {
@@ -105,6 +113,7 @@ impl ThermoflowApp {
             modules: vec![],
             layouts: vec![],
             runs: RunLibraryDef::default(),
+            plotting_workspace: None,
         });
         self.project_path = None;
         self.init_run_store(); // Initialize run store even without a path
@@ -123,6 +132,13 @@ impl ThermoflowApp {
                 if let Some(parent) = path.parent() {
                     self.last_directory = Some(parent.to_path_buf());
                 }
+
+                // Restore plotting workspace from project if available
+                if let Some(plotting_workspace_def) = project.plotting_workspace.as_ref() {
+                    self.plot_view.workspace =
+                        crate::plot_workspace::PlotWorkspace::from_def(plotting_workspace_def);
+                }
+
                 self.project = Some(project);
                 self.project_path = Some(path);
                 self.init_run_store();
@@ -164,15 +180,23 @@ impl ThermoflowApp {
     }
 
     fn save_project(&mut self) {
-        if let (Some(project), Some(path)) = (self.project.as_ref(), self.project_path.as_ref()) {
-            if let Err(e) = tf_project::save_yaml(path, project) {
-                self.last_worker_message = Some(format!("Failed to save project: {}", e));
+        if let Some(project) = self.project.as_mut() {
+            if let Some(path) = self.project_path.as_ref() {
+                // Update the project with current plotting workspace state
+                project.plotting_workspace = Some(self.plot_view.workspace.to_def());
+
+                if let Err(e) = tf_project::save_yaml(path, project) {
+                    self.last_worker_message = Some(format!("Failed to save project: {}", e));
+                }
             }
         }
     }
 
     fn save_project_as(&mut self, path: PathBuf) {
-        if let Some(project) = self.project.as_ref() {
+        if let Some(project) = self.project.as_mut() {
+            // Update the project with current plotting workspace state
+            project.plotting_workspace = Some(self.plot_view.workspace.to_def());
+
             if let Err(e) = tf_project::save_yaml(&path, project) {
                 self.last_worker_message = Some(format!("Failed to save project: {}", e));
             } else {
@@ -628,6 +652,15 @@ impl ThermoflowApp {
 
 impl eframe::App for ThermoflowApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Handle smoke-test mode: exit after rendering a few frames to verify startup
+        if self.smoke_test_mode {
+            self.smoke_test_frames_rendered += 1;
+            if self.smoke_test_frames_rendered > 2 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+        }
+
         self.poll_worker();
 
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
@@ -855,7 +888,7 @@ impl eframe::App for ThermoflowApp {
                 }
             }
 
-            if self.run_worker.is_some() || self.last_worker_message.is_some() {
+            if self.run_worker.is_some() {
                 ui.separator();
                 ui.group(|ui| {
                     ui.heading("Run Status");

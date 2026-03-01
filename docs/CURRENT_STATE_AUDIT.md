@@ -1,11 +1,11 @@
 # Thermoflow Current State Audit
 
-**Date**: February 27, 2026  
-**Snapshot**: Post-Phase 10 completion (Direct rho,h→T→P pressure inversion)  
+**Date**: February 28, 2026  
+**Snapshot**: Post-Phase 3+ completion (Advanced plotting workspace with drag/resize, templates, persistence)  
 **Status**: Code-grounded, verified against actual implementation  
-**Scope**: Workspace structure, canonical paths, solver architecture, support matrix
+**Scope**: Workspace structure, canonical paths, solver architecture, plotting features, support matrix
 
-**Recent Optimization**: Phase 10 eliminated the nested bisection bottleneck in control volume pressure inversion, achieving **2.4-3.7x overall speedup** and **5.5-7.4x speedup** in CV pressure solve specifically. See `PERFORMANCE_BASELINE.md` for detailed results.
+**Recent Enhancement**: Plotting workspace now supports multiple interactive plots with drag/reposition, resize, per-plot series configuration, templates, and persistent save/load. See PLOTTING_WORKSPACE.md for details.
 
 ---
 

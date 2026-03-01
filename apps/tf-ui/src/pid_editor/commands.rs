@@ -1,7 +1,7 @@
 use egui::{Pos2, Vec2};
 use tf_project::schema::{
     ComponentDef, ComponentKind, ControlBlockDef, ControlConnectionDef, LayoutDef, NodeDef,
-    NodeKind, Project,
+    NodeKind, Project, SystemDef,
 };
 
 use super::model::{
@@ -739,8 +739,8 @@ pub fn move_selection(
 
 /// Command trait for undo/redo
 pub trait Command {
-    fn execute(&mut self, project: &mut Project, system_id: &str);
-    fn undo(&mut self, project: &mut Project, system_id: &str);
+    fn execute(&mut self, project: &mut Project, system_id: &str, selection: &mut Selection);
+    fn undo(&mut self, project: &mut Project, system_id: &str, selection: &mut Selection);
     fn description(&self) -> String;
 }
 
@@ -761,8 +761,14 @@ impl CommandHistory {
         }
     }
 
-    pub fn execute(&mut self, mut cmd: Box<dyn Command>, project: &mut Project, system_id: &str) {
-        cmd.execute(project, system_id);
+    pub fn execute(
+        &mut self,
+        mut cmd: Box<dyn Command>,
+        project: &mut Project,
+        system_id: &str,
+        selection: &mut Selection,
+    ) {
+        cmd.execute(project, system_id, selection);
         self.undo_stack.push(cmd);
         self.redo_stack.clear();
 
@@ -771,9 +777,23 @@ impl CommandHistory {
         }
     }
 
-    pub fn undo(&mut self, project: &mut Project, system_id: &str) -> bool {
+    pub fn push_executed(&mut self, cmd: Box<dyn Command>) {
+        self.undo_stack.push(cmd);
+        self.redo_stack.clear();
+
+        if self.undo_stack.len() > self.max_history {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    pub fn undo(
+        &mut self,
+        project: &mut Project,
+        system_id: &str,
+        selection: &mut Selection,
+    ) -> bool {
         if let Some(mut cmd) = self.undo_stack.pop() {
-            cmd.undo(project, system_id);
+            cmd.undo(project, system_id, selection);
             self.redo_stack.push(cmd);
             true
         } else {
@@ -781,9 +801,14 @@ impl CommandHistory {
         }
     }
 
-    pub fn redo(&mut self, project: &mut Project, system_id: &str) -> bool {
+    pub fn redo(
+        &mut self,
+        project: &mut Project,
+        system_id: &str,
+        selection: &mut Selection,
+    ) -> bool {
         if let Some(mut cmd) = self.redo_stack.pop() {
-            cmd.execute(project, system_id);
+            cmd.execute(project, system_id, selection);
             self.undo_stack.push(cmd);
             true
         } else {
@@ -805,6 +830,77 @@ impl CommandHistory {
     }
 }
 
+pub struct SnapshotCommand {
+    description: String,
+    before_system: SystemDef,
+    before_layout: LayoutDef,
+    before_selection: Selection,
+    after_system: SystemDef,
+    after_layout: LayoutDef,
+    after_selection: Selection,
+}
+
+impl SnapshotCommand {
+    pub fn new(
+        description: impl Into<String>,
+        before_system: SystemDef,
+        before_layout: LayoutDef,
+        before_selection: Selection,
+        after_system: SystemDef,
+        after_layout: LayoutDef,
+        after_selection: Selection,
+    ) -> Self {
+        Self {
+            description: description.into(),
+            before_system,
+            before_layout,
+            before_selection,
+            after_system,
+            after_layout,
+            after_selection,
+        }
+    }
+
+    fn apply_snapshot(
+        project: &mut Project,
+        system_id: &str,
+        system: &SystemDef,
+        layout: &LayoutDef,
+    ) {
+        if let Some(idx) = project.systems.iter().position(|s| s.id == system_id) {
+            project.systems[idx] = system.clone();
+        } else {
+            project.systems.push(system.clone());
+        }
+
+        if let Some(idx) = project
+            .layouts
+            .iter()
+            .position(|l| l.system_id == system_id)
+        {
+            project.layouts[idx] = layout.clone();
+        } else {
+            project.layouts.push(layout.clone());
+        }
+    }
+}
+
+impl Command for SnapshotCommand {
+    fn execute(&mut self, project: &mut Project, system_id: &str, selection: &mut Selection) {
+        Self::apply_snapshot(project, system_id, &self.after_system, &self.after_layout);
+        *selection = self.after_selection.clone();
+    }
+
+    fn undo(&mut self, project: &mut Project, system_id: &str, selection: &mut Selection) {
+        Self::apply_snapshot(project, system_id, &self.before_system, &self.before_layout);
+        *selection = self.before_selection.clone();
+    }
+
+    fn description(&self) -> String {
+        self.description.clone()
+    }
+}
+
 /// Move command
 pub struct MoveCommand {
     selection: Selection,
@@ -823,7 +919,7 @@ impl MoveCommand {
 }
 
 impl Command for MoveCommand {
-    fn execute(&mut self, project: &mut Project, system_id: &str) {
+    fn execute(&mut self, project: &mut Project, system_id: &str, selection: &mut Selection) {
         move_selection(
             project,
             system_id,
@@ -831,9 +927,10 @@ impl Command for MoveCommand {
             self.delta,
             self.snap_to_grid,
         );
+        *selection = self.selection.clone();
     }
 
-    fn undo(&mut self, project: &mut Project, system_id: &str) {
+    fn undo(&mut self, project: &mut Project, system_id: &str, selection: &mut Selection) {
         move_selection(
             project,
             system_id,
@@ -841,6 +938,7 @@ impl Command for MoveCommand {
             -self.delta,
             self.snap_to_grid,
         );
+        *selection = self.selection.clone();
     }
 
     fn description(&self) -> String {
@@ -917,8 +1015,8 @@ impl DeleteCommand {
 }
 
 impl Command for DeleteCommand {
-    fn execute(&mut self, project: &mut Project, system_id: &str) {
-        let selection = Selection {
+    fn execute(&mut self, project: &mut Project, system_id: &str, selection: &mut Selection) {
+        let delete_ids = Selection {
             nodes: self.deleted_nodes.iter().map(|n| n.id.clone()).collect(),
             components: self
                 .deleted_components
@@ -932,10 +1030,11 @@ impl Command for DeleteCommand {
                 .collect(),
             signal_connections: Default::default(),
         };
-        delete_selection(project, system_id, &selection);
+        delete_selection(project, system_id, &delete_ids);
+        selection.clear();
     }
 
-    fn undo(&mut self, project: &mut Project, system_id: &str) {
+    fn undo(&mut self, project: &mut Project, system_id: &str, selection: &mut Selection) {
         // Get layout first
         let layout_index = layout_index_for_system(project, system_id);
         let mut pid_layout = PidLayout::from_layout_def(&project.layouts[layout_index]);
@@ -983,6 +1082,18 @@ impl Command for DeleteCommand {
         }
 
         pid_layout.apply_to_layout_def(&mut project.layouts[layout_index]);
+
+        let mut restored = Selection::new();
+        for node in &self.deleted_nodes {
+            restored.add_node(node.id.clone());
+        }
+        for component in &self.deleted_components {
+            restored.add_component(component.id.clone());
+        }
+        for block in &self.deleted_control_blocks {
+            restored.add_control_block(block.id.clone());
+        }
+        *selection = restored;
     }
 
     fn description(&self) -> String {

@@ -97,6 +97,7 @@ mod tests {
             modules: vec![],
             layouts: vec![],
             runs: RunLibraryDef::default(),
+            plotting_workspace: None,
         };
 
         let migrated = migrate_to_latest(project.clone()).unwrap();
@@ -153,6 +154,7 @@ mod tests {
             modules: vec![],
             layouts: vec![],
             runs: RunLibraryDef::default(),
+            plotting_workspace: None,
         };
 
         let migrated = migrate_to_latest(project).unwrap();

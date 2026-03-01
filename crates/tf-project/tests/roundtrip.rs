@@ -10,6 +10,7 @@ fn roundtrip_yaml_empty_project() {
         modules: vec![],
         layouts: vec![],
         runs: RunLibraryDef::default(),
+        plotting_workspace: None,
     };
 
     validate_project(&project).unwrap();
@@ -76,6 +77,7 @@ fn roundtrip_yaml_simple_system() {
         modules: vec![],
         layouts: vec![],
         runs: RunLibraryDef::default(),
+        plotting_workspace: None,
     };
 
     validate_project(&project).unwrap();
@@ -127,6 +129,7 @@ fn validation_fails_on_missing_node() {
         modules: vec![],
         layouts: vec![],
         runs: RunLibraryDef::default(),
+        plotting_workspace: None,
     };
 
     let result = validate_project(&project);

@@ -46,51 +46,48 @@ pub fn draw_component_symbol(
     component_kind: &ComponentKind,
     center: Pos2,
     color: Color32,
+    scale: f32,
 ) {
+    let scale = scale.clamp(0.2, 8.0);
+    let stroke = Stroke::new((2.0 * scale).clamp(1.0, 6.0), color);
+
     match component_kind {
         ComponentKind::Orifice { .. } => {
-            let w = 14.0;
+            let w = 14.0 * scale;
             painter.line_segment(
                 [center + Vec2::new(-w, -w), center + Vec2::new(w, w)],
-                Stroke::new(2.0, color),
+                stroke,
             );
             painter.line_segment(
                 [center + Vec2::new(-w, w), center + Vec2::new(w, -w)],
-                Stroke::new(2.0, color),
+                stroke,
             );
         }
         ComponentKind::Valve { .. } => {
-            let w = 12.0;
+            let w = 12.0 * scale;
             painter.line_segment(
                 [center + Vec2::new(-w, -w), center + Vec2::new(0.0, 0.0)],
-                Stroke::new(2.0, color),
+                stroke,
             );
             painter.line_segment(
                 [center + Vec2::new(w, -w), center + Vec2::new(0.0, 0.0)],
-                Stroke::new(2.0, color),
+                stroke,
             );
         }
         ComponentKind::Pipe { .. } => {
-            painter.circle_stroke(center, 6.0, Stroke::new(2.0, color));
+            painter.circle_stroke(center, 6.0 * scale, stroke);
         }
         ComponentKind::Pump { .. } => {
-            painter.circle_stroke(center, 10.0, Stroke::new(2.0, color));
-            painter.line_segment(
-                [center, center + Vec2::new(10.0, 0.0)],
-                Stroke::new(2.0, color),
-            );
+            painter.circle_stroke(center, 10.0 * scale, stroke);
+            painter.line_segment([center, center + Vec2::new(10.0 * scale, 0.0)], stroke);
         }
         ComponentKind::Turbine { .. } => {
-            painter.circle_stroke(center, 10.0, Stroke::new(2.0, color));
-            painter.line_segment(
-                [center, center + Vec2::new(-10.0, 0.0)],
-                Stroke::new(2.0, color),
-            );
+            painter.circle_stroke(center, 10.0 * scale, stroke);
+            painter.line_segment([center, center + Vec2::new(-10.0 * scale, 0.0)], stroke);
         }
         ComponentKind::LineVolume { .. } => {
-            // Draw a rectangle to represent volume
-            let rect = egui::Rect::from_center_size(center, Vec2::new(20.0, 12.0));
-            painter.rect_stroke(rect, 0.0, Stroke::new(2.0, color));
+            let rect = egui::Rect::from_center_size(center, Vec2::new(20.0 * scale, 12.0 * scale));
+            painter.rect_stroke(rect, 0.0, stroke);
         }
     }
 }
@@ -100,73 +97,71 @@ pub fn draw_control_block_symbol(
     block_kind: &ControlBlockKindDef,
     center: Pos2,
     color: Color32,
+    scale: f32,
 ) {
-    let half_w = 20.0;
-    let half_h = 14.0;
+    let scale = scale.clamp(0.2, 8.0);
+    let half_w = 20.0 * scale;
+    let half_h = 14.0 * scale;
 
-    // All control blocks are rounded rectangles
     let rect = Rect::from_center_size(center, Vec2::new(half_w * 2.0, half_h * 2.0));
-    painter.rect_stroke(rect, 4.0, Stroke::new(2.0, color));
+    painter.rect_stroke(
+        rect,
+        4.0 * scale,
+        Stroke::new((2.0 * scale).clamp(1.0, 6.0), color),
+    );
 
-    // Draw type-specific icon inside
     match block_kind {
         ControlBlockKindDef::Constant { .. } => {
-            // Draw "K" for constant
             painter.text(
                 center,
                 egui::Align2::CENTER_CENTER,
                 "K",
-                egui::FontId::proportional(12.0),
+                egui::FontId::proportional(12.0 * scale),
                 color,
             );
         }
         ControlBlockKindDef::MeasuredVariable { .. } => {
-            // Draw "M" for measured variable
             painter.text(
                 center,
                 egui::Align2::CENTER_CENTER,
                 "M",
-                egui::FontId::proportional(12.0),
+                egui::FontId::proportional(12.0 * scale),
                 color,
             );
         }
         ControlBlockKindDef::PIController { .. } => {
-            // Draw "PI" for PI controller
             painter.text(
                 center,
                 egui::Align2::CENTER_CENTER,
                 "PI",
-                egui::FontId::proportional(10.0),
+                egui::FontId::proportional(10.0 * scale),
                 color,
             );
         }
         ControlBlockKindDef::PIDController { .. } => {
-            // Draw "PID" for PID controller
             painter.text(
                 center,
                 egui::Align2::CENTER_CENTER,
                 "PD",
-                egui::FontId::proportional(10.0),
+                egui::FontId::proportional(10.0 * scale),
                 color,
             );
         }
         ControlBlockKindDef::FirstOrderActuator { .. } => {
-            // Draw "A" for actuator
             painter.text(
                 center,
                 egui::Align2::CENTER_CENTER,
                 "A",
-                egui::FontId::proportional(12.0),
+                egui::FontId::proportional(12.0 * scale),
                 color,
             );
         }
         ControlBlockKindDef::ActuatorCommand { .. } => {
-            // Draw "Cmd" for command
             painter.text(
                 center,
                 egui::Align2::CENTER_CENTER,
                 "C",
-                egui::FontId::proportional(12.0),
+                egui::FontId::proportional(12.0 * scale),
                 color,
             );
         }
