@@ -1,8 +1,60 @@
-//! Advanced plotting workspace with tabbed interface.
+//! Advanced plotting workspace with tabbed interface and split layouts.
 
 use crate::plot_workspace::{PlotPanel, PlotWorkspace};
 use egui_plot::{Legend, Line, Plot, PlotPoints};
 use tf_results::{RunStore, TimeseriesRecord};
+
+/// Split container ID for identifying containers in the tree
+type ContainerId = usize;
+
+/// Drop zone position for drag-to-split
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DropZone {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+/// Split container - can be a leaf (tabs) or a split (horizontal/vertical)
+#[derive(Debug, Clone)]
+enum SplitContainer {
+    Leaf {
+        id: ContainerId,
+        panel_ids: Vec<String>,
+        active_tab: usize,
+    },
+    HSplit {
+        id: ContainerId,
+        left: Box<SplitContainer>,
+        right: Box<SplitContainer>,
+        ratio: f32, // 0.0 to 1.0, position of divider
+    },
+    VSplit {
+        id: ContainerId,
+        top: Box<SplitContainer>,
+        bottom: Box<SplitContainer>,
+        ratio: f32,
+    },
+}
+
+impl SplitContainer {
+    fn new_leaf(id: ContainerId, panel_ids: Vec<String>) -> Self {
+        Self::Leaf {
+            id,
+            panel_ids,
+            active_tab: 0,
+        }
+    }
+
+    fn get_id(&self) -> ContainerId {
+        match self {
+            Self::Leaf { id, .. } => *id,
+            Self::HSplit { id, .. } => *id,
+            Self::VSplit { id, .. } => *id,
+        }
+    }
+}
 
 /// Plot view with tabbed multi-plot interface.
 pub struct PlotView {
@@ -14,8 +66,14 @@ pub struct PlotView {
     show_template_manager: bool,
     template_rename_target: Option<String>,
     template_rename_input: String,
-    // Tab/split state
-    active_tab_index: usize,
+    // Split layout state
+    root_container: SplitContainer,
+    next_container_id: ContainerId,
+    active_container_id: Option<ContainerId>,
+    // Drag state
+    dragging_panel_id: Option<String>,
+    dragging_from_container: Option<ContainerId>,
+    drop_target: Option<(ContainerId, DropZone)>,
     // Series selection overlay
     show_series_overlay: bool,
     series_overlay_panel: Option<String>,
@@ -32,7 +90,12 @@ impl Default for PlotView {
             show_template_manager: false,
             template_rename_target: None,
             template_rename_input: String::new(),
-            active_tab_index: 0,
+            root_container: SplitContainer::new_leaf(0, Vec::new()),
+            next_container_id: 1,
+            active_container_id: Some(0),
+            dragging_panel_id: None,
+            dragging_from_container: None,
+            drop_target: None,
             show_series_overlay: false,
             series_overlay_panel: None,
         }
@@ -40,6 +103,86 @@ impl Default for PlotView {
 }
 
 impl PlotView {
+    /// Find a container by ID in the tree
+    fn find_container_mut(
+        container: &mut SplitContainer,
+        id: ContainerId,
+    ) -> Option<&mut SplitContainer> {
+        if container.get_id() == id {
+            return Some(container);
+        }
+        match container {
+            SplitContainer::HSplit { left, right, .. } => {
+                Self::find_container_mut(left, id)
+                    .or_else(|| Self::find_container_mut(right, id))
+            }
+            SplitContainer::VSplit { top, bottom, .. } => {
+                Self::find_container_mut(top, id)
+                    .or_else(|| Self::find_container_mut(bottom, id))
+            }
+            SplitContainer::Leaf { .. } => None,
+        }
+    }
+
+    /// Apply a drop operation
+    fn apply_drop(&mut self, target_container_id: ContainerId, zone: DropZone, panel_id: String) {
+        let new_id = self.next_container_id;
+        self.next_container_id += 1;
+
+        // Create a new leaf with the dragged panel
+        let new_leaf = SplitContainer::new_leaf(new_id, vec![panel_id]);
+
+        // Find and split the target container
+        self.split_container_at(target_container_id, zone, new_leaf);
+    }
+
+    /// Split a container at the given position
+    fn split_container_at(
+        &mut self,
+        target_id: ContainerId,
+        zone: DropZone,
+        new_container: SplitContainer,
+    ) {
+        // This is complex - we need to replace the target container with a split
+        // For now, let's implement a simpler version that works at the root level
+        if self.root_container.get_id() == target_id {
+            let old_root = std::mem::replace(
+                &mut self.root_container,
+                SplitContainer::new_leaf(0, Vec::new()),
+            );
+            
+            let split_id = self.next_container_id;
+            self.next_container_id += 1;
+
+            self.root_container = match zone {
+                DropZone::Left => SplitContainer::HSplit {
+                    id: split_id,
+                    left: Box::new(new_container),
+                    right: Box::new(old_root),
+                    ratio: 0.5,
+                },
+                DropZone::Right => SplitContainer::HSplit {
+                    id: split_id,
+                    left: Box::new(old_root),
+                    right: Box::new(new_container),
+                    ratio: 0.5,
+                },
+                DropZone::Top => SplitContainer::VSplit {
+                    id: split_id,
+                    top: Box::new(new_container),
+                    bottom: Box::new(old_root),
+                    ratio: 0.5,
+                },
+                DropZone::Bottom => SplitContainer::VSplit {
+                    id: split_id,
+                    top: Box::new(old_root),
+                    bottom: Box::new(new_container),
+                    ratio: 0.5,
+                },
+            };
+        }
+    }
+
     /// Show the plotting workspace with tabbed interface and drag-to-split.
     pub fn show(
         &mut self,
@@ -50,10 +193,22 @@ impl PlotView {
         ui.heading("Plotting Workspace");
         ui.separator();
 
-        // Ensure workspace has a default plot if empty
+        // Sync workspace panels into root container if needed
+        if let SplitContainer::Leaf { panel_ids, .. } = &mut self.root_container {
+            if panel_ids.is_empty() && !self.workspace.panel_order.is_empty() {
+                *panel_ids = self.workspace.panel_order.clone();
+            }
+        }
+
+        //Ensure workspace has a default plot if empty
         if self.workspace.panels.is_empty() && selected_run_id.is_some() {
-            self.workspace
+            let panel_id = self.workspace
                 .create_panel("Plot 1".to_string(), selected_run_id.clone());
+            
+            // Add to root container
+            if let SplitContainer::Leaf { panel_ids, .. } = &mut self.root_container {
+                panel_ids.push(panel_id);
+            }
         }
 
         if run_store.is_none() || selected_run_id.is_none() {
@@ -87,72 +242,32 @@ impl PlotView {
         }
 
         // ===== TOOLBAR =====
-        let (show_rename, show_delete, show_save_template) = ui.horizontal(|ui| {
-            if ui.button("➕ New Plot").clicked() {
-                let title = format!("Plot {}", self.workspace.panels.len() + 1);
-                let new_id = self.workspace.create_panel(title, selected_run_id.clone());
-                // Select the new plot
-                if let Some(idx) = self.workspace.panel_order.iter().position(|id| id == &new_id) {
-                    self.active_tab_index = idx;
-                }
-            }
+        let new_plot_requested = ui.horizontal(|ui| {
+            let new_plot = ui.button("➕ New Plot").clicked();
 
             if ui.button("📋 Templates").clicked() {
                 self.show_template_manager = !self.show_template_manager;
             }
 
-            let mut show_rename = false;
-            let mut show_delete = false;
-            let mut show_save_template = false;
+            ui.separator();
+            ui.label(format!("Drag tabs to split views | {} plot(s)", self.workspace.panels.len()));
 
-            // Get active panel
-            if let Some(active_id) = self.workspace.panel_order.get(self.active_tab_index) {
-                if let Some(panel) = self.workspace.panels.get(active_id) {
-                    ui.separator();
-                    ui.label(format!("Active: {}", panel.title));
-
-                    if ui.button("➕ Add Series").clicked() {
-                        self.show_series_overlay = !self.show_series_overlay;
-                        self.series_overlay_panel = Some(active_id.clone());
-                    }
-
-                    if ui.button("✏ Rename").clicked() {
-                        show_rename = true;
-                    }
-
-                    if ui.button("🗑 Delete").clicked() {
-                        show_delete = true;
-                    }
-
-                    if ui.button("💾 Template").clicked() {
-                        show_save_template = true;
-                    }
-                }
-            }
-            (show_rename, show_delete, show_save_template)
+            new_plot
         }).inner;
 
-        // Handle button actions after the borrow
-        if show_rename {
-            if let Some(active_id) = self.workspace.panel_order.get(self.active_tab_index).cloned() {
-                if let Some(panel) = self.workspace.panels.get(&active_id) {
-                    self.rename_target = Some(active_id.clone());
-                    self.rename_input = panel.title.clone();
+        // Handle new plot creation
+        if new_plot_requested {
+            let title = format!("Plot {}", self.workspace.panels.len() + 1);
+            let new_id = self.workspace.create_panel(title, selected_run_id.clone());
+            
+            // Add to active container
+            if let Some(active_id) = self.active_container_id {
+                if let Some(container) = Self::find_container_mut(&mut self.root_container, active_id) {
+                    if let SplitContainer::Leaf { panel_ids, active_tab, .. } = container {
+                        panel_ids.push(new_id);
+                        *active_tab = panel_ids.len() - 1;
+                    }
                 }
-            }
-        }
-        if show_delete {
-            if let Some(active_id) = self.workspace.panel_order.get(self.active_tab_index).cloned() {
-                self.workspace.delete_panel(&active_id);
-                // Adjust tab index if needed
-                if self.active_tab_index >= self.workspace.panel_order.len() && self.active_tab_index > 0 {
-                    self.active_tab_index -= 1;
-                }
-            }
-        }
-        if show_save_template {
-            if let Some(active_id) = self.workspace.panel_order.get(self.active_tab_index).cloned() {
-                self.save_panel_as_template(&active_id);
             }
         }
 
@@ -179,38 +294,6 @@ impl PlotView {
             });
             ui.separator();
         }
-
-        // ===== TAB BAR =====
-        ui.horizontal(|ui| {
-            for (idx, panel_id) in self.workspace.panel_order.clone().iter().enumerate() {
-                if let Some(panel) = self.workspace.panels.get(panel_id) {
-                    let is_active = idx == self.active_tab_index;
-                    
-                    let tab_text = if is_active {
-                        egui::RichText::new(format!("📊 {}", panel.title))
-                            .strong()
-                            .color(egui::Color32::from_rgb(100, 180, 255))
-                    } else {
-                        egui::RichText::new(format!("📊 {}", panel.title))
-                    };
-
-                    let button = ui.add(
-                        egui::Button::new(tab_text)
-                            .fill(if is_active {
-                                egui::Color32::from_rgb(40, 60, 100)
-                            } else {
-                                egui::Color32::from_gray(30)
-                            })
-                    );
-
-                    if button.clicked() {
-                        self.active_tab_index = idx;
-                    }
-                }
-            }
-        });
-
-        ui.separator();
 
         // ===== SERIES SELECTION OVERLAY =====
         if self.show_series_overlay {
@@ -240,53 +323,304 @@ impl PlotView {
             }
         }
 
-        // ===== MAIN PLOT AREA (MAXIMIZED) =====
-        let available_size = ui.available_size();
+        // ===== MAIN SPLIT LAYOUT =====
+        let available_rect = ui.available_rect_before_wrap();
+        let root_container = self.root_container.clone();
         
-        // Get active panel
-        if let Some(active_id) = self.workspace.panel_order.get(self.active_tab_index) {
-            if let Some(panel) = self.workspace.panels.get(active_id).cloned() {
-                let (plot_rect, plot_response) = ui.allocate_exact_size(
-                    available_size,
-                    egui::Sense::click(),
+        self.render_split_container(ui, &root_container, available_rect);
+
+        // Handle drop if drag released
+        if let (Some(dragging_id), Some((target_id, zone))) = 
+            (&self.dragging_panel_id.clone(), &self.drop_target) {
+            if ui.input(|i| i.pointer.any_released()) {
+                self.apply_drop(*target_id, *zone, dragging_id.clone());
+                self.dragging_panel_id = None;
+                self.drop_target = None;
+                self.dragging_from_container = None;
+            }
+        }
+    }
+
+    /// Recursively render a split container
+    fn render_split_container(
+        &mut self,
+        ui: &mut egui::Ui,
+        container: &SplitContainer,
+        rect: egui::Rect,
+    ) {
+        match container {
+            SplitContainer::Leaf { id, panel_ids, active_tab } => {
+                self.render_leaf_container(ui, *id, panel_ids, *active_tab, rect);
+            }
+            SplitContainer::HSplit { left, right, ratio, .. } => {
+                let split_pos = rect.left() + rect.width() * ratio;
+                
+                let left_rect = egui::Rect::from_min_max(
+                    rect.min,
+                    egui::pos2(split_pos - 2.0, rect.max.y),
+                );
+                let right_rect = egui::Rect::from_min_max(
+                    egui::pos2(split_pos + 2.0, rect.min.y),
+                    rect.max,
                 );
 
-                // Draw plot background
-                ui.painter()
-                    .rect_filled(plot_rect, 0.0, egui::Color32::from_gray(20));
+                self.render_split_container(ui, left, left_rect);
+                
+                // Draw divider
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(split_pos - 2.0, rect.min.y),
+                        egui::pos2(split_pos + 2.0, rect.max.y),
+                    ),
+                    0.0,
+                    egui::Color32::from_gray(60),
+                );
 
-                // Show "click to add series" hint if no series
+                self.render_split_container(ui, right, right_rect);
+            }
+            SplitContainer::VSplit { top, bottom, ratio, .. } => {
+                let split_pos = rect.top() + rect.height() * ratio;
+                
+                let top_rect = egui::Rect::from_min_max(
+                    rect.min,
+                    egui::pos2(rect.max.x, split_pos - 2.0),
+                );
+                let bottom_rect = egui::Rect::from_min_max(
+                    egui::pos2(rect.min.x, split_pos + 2.0),
+                    rect.max,
+                );
+
+                self.render_split_container(ui, top, top_rect);
+                
+                // Draw divider
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(rect.min.x, split_pos - 2.0),
+                        egui::pos2(rect.max.x, split_pos + 2.0),
+                    ),
+                    0.0,
+                    egui::Color32::from_gray(60),
+                );
+
+                self.render_split_container(ui, bottom, bottom_rect);
+            }
+        }
+    }
+
+    /// Render a leaf container with tabs
+    fn render_leaf_container(
+        &mut self,
+        ui: &mut egui::Ui,
+        container_id: ContainerId,
+        panel_ids: &[String],
+        mut active_tab: usize,
+        rect: egui::Rect,
+    ) {
+        // Guard against invalid active_tab
+        if active_tab >= panel_ids.len() && !panel_ids.is_empty() {
+            active_tab = 0;
+        }
+
+        // Draw container background
+        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(20));
+
+        // Tab bar height
+        let tab_height = 30.0;
+        let tab_bar_rect = egui::Rect::from_min_max(
+            rect.min,
+            egui::pos2(rect.max.x, rect.min.y + tab_height),
+        );
+
+        // Draw tab bar background
+        ui.painter().rect_filled(tab_bar_rect, 0.0, egui::Color32::from_gray(30));
+
+        // Render tabs
+        let mut tab_x = rect.min.x + 5.0;
+        let mut new_active_tab = active_tab;
+        let mut dragging_started = false;
+        let mut dragging_tab_id = None;
+
+        for (idx, panel_id) in panel_ids.iter().enumerate() {
+            if let Some(panel) = self.workspace.panels.get(panel_id) {
+                let is_active = idx == active_tab;
+                let tab_text = format!("📊 {}", panel.title);
+                let tab_width = 120.0;
+
+                let tab_rect = egui::Rect::from_min_max(
+                    egui::pos2(tab_x, rect.min.y + 2.0),
+                    egui::pos2(tab_x + tab_width, rect.min.y + tab_height - 2.0),
+                );
+
+                // Tab background
+                let tab_bg = if is_active {
+                    egui::Color32::from_rgb(40, 60, 100)
+                } else {
+                    egui::Color32::from_gray(35)
+                };
+                ui.painter().rect_filled(tab_rect, 2.0, tab_bg);
+
+                // Tab text
+                let text_color = if is_active {
+                    egui::Color32::from_rgb(100, 180, 255)
+                } else {
+                    egui::Color32::LIGHT_GRAY
+                };
+                ui.painter().text(
+                    tab_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    &tab_text,
+                    egui::FontId::proportional(12.0),
+                    text_color,
+                );
+
+                // Handle interaction
+                let tab_response = ui.interact(
+                    tab_rect,
+                    ui.id().with(container_id).with(idx),
+                    egui::Sense::click_and_drag(),
+                );
+
+                if tab_response.clicked() {
+                    new_active_tab = idx;
+                    self.active_container_id = Some(container_id);
+                }
+
+                if tab_response.drag_started() {
+                    dragging_started = true;
+                    dragging_tab_id = Some(panel_id.clone());
+                    self.dragging_from_container = Some(container_id);
+                }
+
+                tab_x += tab_width + 5.0;
+            }
+        }
+
+        // Update active tab if changed
+        if new_active_tab != active_tab {
+            if let Some(container) = Self::find_container_mut(&mut self.root_container, container_id) {
+                if let SplitContainer::Leaf { active_tab: at, .. } = container {
+                    *at = new_active_tab;
+                }
+            }
+        }
+
+        // Start dragging if needed
+        if dragging_started {
+            if let Some(id) = dragging_tab_id {
+                self.dragging_panel_id = Some(id);
+            }
+        }
+
+        // Draw drop zones if dragging
+        if self.dragging_panel_id.is_some() && self.dragging_from_container != Some(container_id) {
+            self.draw_drop_zones(ui, container_id, rect);
+        }
+
+        // Render active plot
+        if !panel_ids.is_empty() && active_tab < panel_ids.len() {
+            let active_panel_id = &panel_ids[active_tab];
+            if let Some(panel) = self.workspace.panels.get(active_panel_id).cloned() {
+                let plot_rect = egui::Rect::from_min_max(
+                    egui::pos2(rect.min.x, rect.min.y + tab_height),
+                    rect.max,
+                );
+
+                // Check if plot has series
                 let has_series = !panel.series_selection.node_ids_and_variables.is_empty()
                     || !panel.series_selection.component_ids_and_variables.is_empty()
                     || !panel.series_selection.control_ids.is_empty();
 
                 if !has_series {
+                    // Show hint
                     let center = plot_rect.center();
                     ui.painter().text(
                         center,
                         egui::Align2::CENTER_CENTER,
-                        "Click '➕ Add Series' to add traces to this plot",
-                        egui::FontId::proportional(16.0),
+                        "Click plot to add series",
+                        egui::FontId::proportional(14.0),
                         egui::Color32::GRAY,
                     );
-                }
 
-                // Render the plot
-                if has_series {
+                    // Handle click
+                    let plot_response = ui.interact(
+                        plot_rect,
+                        ui.id().with("plot_hint").with(active_panel_id),
+                        egui::Sense::click(),
+                    );
+                    if plot_response.clicked() {
+                        self.show_series_overlay = true;
+                        self.series_overlay_panel = Some(active_panel_id.clone());
+                    }
+                } else {
+                    // Render actual plot
                     let mut plot_ui = ui.new_child(
                         egui::UiBuilder::new()
                             .max_rect(plot_rect)
                             .layout(egui::Layout::top_down(egui::Align::Min))
-                            .id_salt(active_id),
+                            .id_salt(active_panel_id),
                     );
                     self.render_plot(&mut plot_ui, &panel, &self.cached_timeseries);
                 }
+            }
+        }
+    }
 
-                // Handle click to show series overlay
-                if plot_response.clicked() {
-                    self.show_series_overlay = true;
-                    self.series_overlay_panel = Some(active_id.clone());
+    /// Draw drop zones for drag-to-split
+    fn draw_drop_zones(&mut self, ui: &mut egui::Ui, container_id: ContainerId, rect: egui::Rect) {
+        let zone_size = 50.0;
+        let zones = [
+            (DropZone::Left, egui::Rect::from_min_size(
+                rect.min,
+                egui::vec2(zone_size, rect.height()),
+            )),
+            (DropZone::Right, egui::Rect::from_min_size(
+                egui::pos2(rect.max.x - zone_size, rect.min.y),
+                egui::vec2(zone_size, rect.height()),
+            )),
+            (DropZone::Top, egui::Rect::from_min_size(
+                rect.min,
+                egui::vec2(rect.width(), zone_size),
+            )),
+            (DropZone::Bottom, egui::Rect::from_min_size(
+                egui::pos2(rect.min.x, rect.max.y - zone_size),
+                egui::vec2(rect.width(), zone_size),
+            )),
+        ];
+
+        for (zone, zone_rect) in zones {
+            let is_hovered = ui.input(|i| {
+                if let Some(pos) = i.pointer.hover_pos() {
+                    zone_rect.contains(pos)
+                } else {
+                    false
                 }
+            });
+
+            if is_hovered {
+                self.drop_target = Some((container_id, zone));
+            }
+
+            let alpha = if is_hovered { 120 } else { 40 };
+            ui.painter().rect_filled(
+                zone_rect,
+                4.0,
+                egui::Color32::from_rgba_unmultiplied(100, 150, 255, alpha),
+            );
+
+            if is_hovered {
+                // Draw arrow or indicator
+                ui.painter().text(
+                    zone_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    match zone {
+                        DropZone::Left => "◀",
+                        DropZone::Right => "▶",
+                        DropZone::Top => "▲",
+                        DropZone::Bottom => "▼",
+                    },
+                    egui::FontId::proportional(24.0),
+                    egui::Color32::WHITE,
+                );
             }
         }
     }
@@ -355,6 +689,7 @@ impl PlotView {
     }
 
     /// Save current panel as a template.
+    #[allow(dead_code)]
     fn save_panel_as_template(&mut self, panel_id: &str) {
         let template_name = if let Some(panel) = self.workspace.panels.get(panel_id) {
             format!("{} Template", panel.title)
