@@ -35,7 +35,7 @@ impl Default for PlotView {
 }
 
 impl PlotView {
-    /// Show the plotting workspace with tabbed interface.
+    /// Show the plotting workspace with drag/drop canvas.
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -81,128 +81,243 @@ impl PlotView {
             return;
         }
 
-        // ===== TAB BAR =====
-        ui.horizontal(|ui| {
-            // New plot button
-            if ui.button("➕").clicked() {
+        // ===== TOOLBAR =====
+        let (show_rename, show_delete, show_save_template) = ui.horizontal(|ui| {
+            if ui.button("➕ New Plot").clicked() {
                 let title = format!("Plot {}", self.workspace.panels.len() + 1);
                 self.workspace.create_panel(title, selected_run_id.clone());
             }
 
-            ui.separator();
-
-            // Tab buttons for each plot
-            for panel_id in &self.workspace.panel_order.clone() {
-                if let Some(panel) = self.workspace.panels.get(panel_id) {
-                    let is_selected = self.workspace.selected_panel_id.as_ref() == Some(panel_id);
-                    
-                    let tab_response = if is_selected {
-                        ui.button(
-                            egui::RichText::new(format!("📊 {}", panel.title))
-                                .strong()
-                                .color(egui::Color32::YELLOW)
-                        )
-                    } else {
-                        ui.button(&panel.title)
-                    };
-
-                    if tab_response.clicked() {
-                        self.workspace.select_panel(Some(panel_id.clone()));
-                    }
-                }
-            }
-
-            ui.separator();
-
-            // Templates button
             if ui.button("📋 Templates").clicked() {
                 self.show_template_manager = !self.show_template_manager;
             }
-        });
+
+            let mut show_rename = false;
+            let mut show_delete = false;
+            let mut show_save_template = false;
+
+            if let Some(selected_id) = &self.workspace.selected_panel_id {
+                if let Some(panel) = self.workspace.panels.get(selected_id) {
+                    ui.separator();
+                    ui.label(format!("Selected: {}", panel.title));
+
+                    if ui.button("⚙ Configure").clicked() {
+                        self.show_series_config = !self.show_series_config;
+                    }
+
+                    if ui.button("✏ Rename").clicked() {
+                        show_rename = true;
+                    }
+
+                    if ui.button("🗑 Delete").clicked() {
+                        show_delete = true;
+                    }
+
+                    if ui.button("💾 Template").clicked() {
+                        show_save_template = true;
+                    }
+                }
+            }
+            (show_rename, show_delete, show_save_template)
+        }).inner;
+
+        // Handle button actions after the borrow
+        if show_rename {
+            if let Some(selected_id) = &self.workspace.selected_panel_id.clone() {
+                if let Some(panel) = self.workspace.panels.get(selected_id) {
+                    self.rename_target = Some(selected_id.clone());
+                    self.rename_input = panel.title.clone();
+                }
+            }
+        }
+        if show_delete {
+            if let Some(selected_id) = &self.workspace.selected_panel_id.clone() {
+                self.workspace.delete_panel(selected_id);
+            }
+        }
+        if show_save_template {
+            if let Some(selected_id) = &self.workspace.selected_panel_id.clone() {
+                self.save_panel_as_template(selected_id);
+            }
+        }
 
         ui.separator();
 
-        // ===== TEMPLATE MANAGER DIALOG =====
+        // ===== DIALOGS =====
         if self.show_template_manager {
             self.show_template_manager_panel(ui);
             ui.separator();
         }
 
-        // ===== RENAME DIALOG =====
         if let Some(target_id) = &self.rename_target.clone() {
             ui.horizontal(|ui| {
                 ui.label("Rename to:");
                 ui.text_edit_singleline(&mut self.rename_input);
-
                 if ui.button("✓").clicked() {
                     self.workspace
                         .rename_panel(target_id, self.rename_input.clone());
                     self.rename_target = None;
-                    self.rename_input.clear();
                 }
-
                 if ui.button("✗").clicked() {
                     self.rename_target = None;
-                    self.rename_input.clear();
                 }
             });
             ui.separator();
         }
 
-        // ===== MAIN CONTENT AREA =====
-        if let Some(selected_id) = self.workspace.selected_panel_id.clone() {
-            if let Some(panel) = self.workspace.panels.get(&selected_id).cloned() {
-                // Horizontal split: plot on left, config on right
-                ui.horizontal(|ui| {
-                    // Left side: plot area (4/5 width)
-                    ui.vertical(|ui| {
-                        ui.allocate_ui(
-                            egui::vec2(ui.available_width() * 0.8, ui.available_height()),
-                            |ui| {
-                                self.render_plot(ui, &panel, &self.cached_timeseries);
-                            },
-                        );
-                    });
-
-                    ui.separator();
-
-                    // Right side: series configuration (1/5 width)
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false; 2])
+        // ===== SERIES CONFIGURATION =====
+        if self.show_series_config {
+            if let Some(selected_id) = &self.workspace.selected_panel_id.clone() {
+                if let Some(panel) = self.workspace.panels.get(selected_id).cloned() {
+                    egui::CollapsingHeader::new("Series Configuration")
+                        .default_open(true)
                         .show(ui, |ui| {
-                            ui.vertical(|ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("Configure").strong());
-                                    if ui.small_button("└⁻").clicked() {
-                                        self.show_series_config = !self.show_series_config;
-                                    }
+                            egui::ScrollArea::vertical()
+                                .max_height(200.0)
+                                .show(ui, |ui| {
+                                    self.show_panel_editor(ui, &panel, selected_id);
                                 });
-
-                                if self.show_series_config {
-                                    ui.separator();
-                                    self.show_panel_editor(ui, &panel, &selected_id);
-
-                                    ui.separator();
-                                    ui.horizontal(|ui| {
-                                        if ui.button("✏ Rename").clicked() {
-                                            self.rename_target = Some(selected_id.clone());
-                                            self.rename_input = panel.title.clone();
-                                        }
-
-                                        if ui.button("🗑 Delete").clicked() {
-                                            self.workspace.delete_panel(&selected_id);
-                                        }
-
-                                        if ui.button("💾 Save as Template").clicked() {
-                                            self.save_panel_as_template(&selected_id);
-                                        }
-                                    });
-                                }
-                            });
                         });
-                });
+                    ui.separator();
+                }
             }
         }
+
+        // ===== INTERACTIVE CANVAS =====
+        let available_size = ui.available_size();
+        let (canvas_rect, _response) = ui.allocate_exact_size(available_size, egui::Sense::click());
+
+        // Update workspace dimensions
+        self.workspace.workspace_width = available_size.x;
+        self.workspace.workspace_height = available_size.y;
+
+        // Draw canvas background
+        ui.painter()
+            .rect_filled(canvas_rect, 0.0, egui::Color32::from_gray(15));
+
+        // Render all panels
+        let panel_ids: Vec<String> = self.workspace.panel_order.clone();
+        for panel_id in panel_ids {
+            if let Some(panel) = self.workspace.panels.get(&panel_id).cloned() {
+                self.render_draggable_panel(ui, &panel, &panel_id, canvas_rect);
+            }
+        }
+    }
+
+    /// Render a draggable, resizable panel on the canvas.
+    fn render_draggable_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        panel: &PlotPanel,
+        panel_id: &str,
+        canvas_rect: egui::Rect,
+    ) {
+        let is_selected = self.workspace.selected_panel_id.as_deref() == Some(panel_id);
+
+        // Calculate panel rect
+        let panel_pos = canvas_rect.min + egui::vec2(panel.x, panel.y);
+        let panel_rect = egui::Rect::from_min_size(
+            panel_pos,
+            egui::vec2(panel.width, panel.height),
+        );
+
+        // Draw panel border
+        let border_color = if is_selected {
+            egui::Color32::from_rgb(100, 150, 255)
+        } else {
+            egui::Color32::from_gray(80)
+        };
+        let border_width = if is_selected { 2.0 } else { 1.0 };
+
+        ui.painter().rect_stroke(
+            panel_rect,
+            4.0,
+            egui::Stroke::new(border_width, border_color),
+        );
+
+        // Draw panel background
+        ui.painter()
+            .rect_filled(panel_rect, 4.0, egui::Color32::from_gray(25));
+
+        // Title bar area
+        let title_height = 30.0;
+        let title_rect = egui::Rect::from_min_size(
+            panel_rect.min,
+            egui::vec2(panel_rect.width(), title_height),
+        );
+
+        // Draw title bar background
+        let title_bg = if is_selected {
+            egui::Color32::from_rgb(40, 60, 100)
+        } else {
+            egui::Color32::from_gray(35)
+        };
+        ui.painter().rect_filled(title_rect, 0.0, title_bg);
+
+        // Draw title text
+        let title_pos = title_rect.min + egui::vec2(8.0, 8.0);
+        ui.painter().text(
+            title_pos,
+            egui::Align2::LEFT_TOP,
+            format!("📊 {}", panel.title),
+            egui::FontId::proportional(14.0),
+            egui::Color32::WHITE,
+        );
+
+        // Handle title bar dragging
+        let title_response = ui.interact(title_rect, ui.id().with(panel_id).with("title"), egui::Sense::drag());
+        
+        if title_response.clicked() {
+            self.workspace.select_panel(Some(panel_id.to_string()));
+        }
+
+        if title_response.drag_started() {
+            self.workspace.dragging_panel_id = Some(panel_id.to_string());
+        }
+
+        if title_response.dragged() {
+            if let Some(panel) = self.workspace.panels.get_mut(panel_id) {
+                let delta = title_response.drag_delta();
+                panel.x += delta.x;
+                panel.y += delta.y;
+
+                // Clamp to canvas
+                panel.x = panel.x.max(0.0).min(canvas_rect.width() - panel.width);
+                panel.y = panel.y.max(0.0).min(canvas_rect.height() - panel.height);
+
+                // Snap to grid (20px grid)
+                const SNAP_THRESHOLD: f32 = 15.0;
+                let snapped_x = (panel.x / 20.0).round() * 20.0;
+                let snapped_y = (panel.y / 20.0).round() * 20.0;
+                if (panel.x - snapped_x).abs() < SNAP_THRESHOLD {
+                    panel.x = snapped_x;
+                }
+                if (panel.y - snapped_y).abs() < SNAP_THRESHOLD {
+                    panel.y = snapped_y;
+                }
+            }
+        }
+
+        if title_response.drag_stopped() {
+            self.workspace.dragging_panel_id = None;
+        }
+
+        // Plot content area
+        let plot_rect = egui::Rect::from_min_size(
+            panel_rect.min + egui::vec2(0.0, title_height),
+            egui::vec2(panel_rect.width(), panel_rect.height() - title_height),
+        );
+
+        // Render the actual plot inside the panel
+        // Use a clipped child UI for the plot
+        let id = ui.id().with(panel_id).with("plot_content");
+        let mut plot_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(plot_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min))
+                .id_salt(id),
+        );
+        self.render_plot(&mut plot_ui, panel, &self.cached_timeseries);
     }
 
     /// Render template manager panel.
