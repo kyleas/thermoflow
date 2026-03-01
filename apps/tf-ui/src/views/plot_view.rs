@@ -72,6 +72,7 @@ pub struct PlotView {
     next_container_id: ContainerId,
     active_container_id: Option<ContainerId>,
     selected_plot_id: Option<String>, // The plot that drives the inspector panel
+    next_plot_number: usize, // Global counter for plot numbering
     // Drag state
     dragging_panel_id: Option<String>,
     dragging_from_container: Option<ContainerId>,
@@ -95,6 +96,7 @@ impl Default for PlotView {
             next_container_id: 1,
             active_container_id: Some(0),
             selected_plot_id: None,
+            next_plot_number: 1,
             dragging_panel_id: None,
             dragging_from_container: None,
             drop_target: None,
@@ -131,6 +133,68 @@ impl PlotView {
     #[allow(dead_code)]
     pub fn get_active_plot_id(&self) -> Option<String> {
         self.selected_plot_id.clone()
+    }
+
+    /// Clean up empty containers by merging them with siblings
+    fn cleanup_empty_containers(&mut self) {
+        self.root_container = self.consolidate_container(self.root_container.clone());
+    }
+
+    /// Recursively consolidate empty containers
+    fn consolidate_container(&self, container: SplitContainer) -> SplitContainer {
+        match container {
+            SplitContainer::Leaf { .. } => container,
+            SplitContainer::HSplit { id, left, right, ratio } => {
+                let left_consolidated = self.consolidate_container(*left);
+                let right_consolidated = self.consolidate_container(*right);
+
+                // If left is empty, return right
+                if let SplitContainer::Leaf { panel_ids: ref l_ids, .. } = left_consolidated {
+                    if l_ids.is_empty() {
+                        return right_consolidated;
+                    }
+                }
+
+                // If right is empty, return left
+                if let SplitContainer::Leaf { panel_ids: ref r_ids, .. } = right_consolidated {
+                    if r_ids.is_empty() {
+                        return left_consolidated;
+                    }
+                }
+
+                SplitContainer::HSplit {
+                    id,
+                    left: Box::new(left_consolidated),
+                    right: Box::new(right_consolidated),
+                    ratio,
+                }
+            }
+            SplitContainer::VSplit { id, top, bottom, ratio } => {
+                let top_consolidated = self.consolidate_container(*top);
+                let bottom_consolidated = self.consolidate_container(*bottom);
+
+                // If top is empty, return bottom
+                if let SplitContainer::Leaf { panel_ids: ref t_ids, .. } = top_consolidated {
+                    if t_ids.is_empty() {
+                        return bottom_consolidated;
+                    }
+                }
+
+                // If bottom is empty, return top
+                if let SplitContainer::Leaf { panel_ids: ref b_ids, .. } = bottom_consolidated {
+                    if b_ids.is_empty() {
+                        return top_consolidated;
+                    }
+                }
+
+                SplitContainer::VSplit {
+                    id,
+                    top: Box::new(top_consolidated),
+                    bottom: Box::new(bottom_consolidated),
+                    ratio,
+                }
+            }
+        }
     }
 
     /// Find a container by ID in the tree
@@ -196,6 +260,9 @@ impl PlotView {
 
         // Find and split the target container
         Self::split_container_at(&mut self.root_container, target_container_id, zone, new_leaf, &mut self.next_container_id);
+        
+        // Clean up empty containers
+        self.cleanup_empty_containers();
     }
 
     /// Recursively split a container at the given position
@@ -341,8 +408,10 @@ impl PlotView {
 
         //Ensure workspace has a default plot if empty
         if self.workspace.panels.is_empty() && selected_run_id.is_some() {
+            let title = format!("Plot {}", self.next_plot_number);
+            self.next_plot_number += 1;
             let panel_id = self.workspace
-                .create_panel("Plot 1".to_string(), selected_run_id.clone());
+                .create_panel(title, selected_run_id.clone());
             
             // Add to root container
             if let SplitContainer::Leaf { panel_ids, .. } = &mut self.root_container {
@@ -400,7 +469,8 @@ impl PlotView {
 
         // Handle new plot creation
         if new_plot_requested {
-            let title = format!("Plot {}", self.workspace.panels.len() + 1);
+            let title = format!("Plot {}", self.next_plot_number);
+            self.next_plot_number += 1;
             let new_id = self.workspace.create_panel(title, selected_run_id.clone());
             
             // Add to active container

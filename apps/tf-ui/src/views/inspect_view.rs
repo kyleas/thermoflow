@@ -95,7 +95,7 @@ impl InspectView {
                 egui::ScrollArea::vertical()
                     .max_height(400.0)
                     .show(ui, |ui| {
-                        self.show_plot_series_editor(ui, panel);
+                        self.show_plot_series_editor(ui, panel, project.as_ref());
                     });
             }
             
@@ -1154,6 +1154,7 @@ impl InspectView {
         &mut self,
         ui: &mut egui::Ui,
         panel: &mut super::super::plot_workspace::PlotPanel,
+        project: Option<&Project>,
     ) {
         let series = &mut panel.series_selection;
         
@@ -1217,10 +1218,65 @@ impl InspectView {
             ui.separator();
         }
         
-        if series.node_ids_and_variables.is_empty() 
+        // Show available options to add
+        if let Some(proj) = project {
+            if let Some(system) = proj.systems.first() {
+                ui.label("Available to plot:");
+                ui.separator();
+                
+                // Available nodes
+                if !system.nodes.is_empty() {
+                    ui.label("+ Nodes:");
+                    for node in &system.nodes {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("  {}", node.id));
+                            if ui.button("Add P").clicked() {
+                                series.node_ids_and_variables.push((node.id.clone(), "Pressure".to_string()));
+                            }
+                            if ui.button("Add T").clicked() {
+                                series.node_ids_and_variables.push((node.id.clone(), "Temperature".to_string()));
+                            }
+                        });
+                    }
+                    ui.separator();
+                }
+                
+                // Available components
+                if !system.components.is_empty() {
+                    ui.label("+ Components:");
+                    for comp in &system.components {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("  {} ({:?})", comp.id, comp.kind));
+                            if ui.button("Add ṁ").clicked() {
+                                series.component_ids_and_variables.push((comp.id.clone(), "MassFlow".to_string()));
+                            }
+                            if ui.button("Add ΔP").clicked() {
+                                series.component_ids_and_variables.push((comp.id.clone(), "PressureDrop".to_string()));
+                            }
+                        });
+                    }
+                    ui.separator();
+                }
+                
+                // Available control blocks
+                if let Some(controls) = &system.controls {
+                    if !controls.blocks.is_empty() {
+                        ui.label("+ Controls:");
+                        for ctrl in &controls.blocks {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("  {}", ctrl.id));
+                                if ui.button("Add").clicked() {
+                                    series.control_ids.push(ctrl.id.clone());
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        } else if series.node_ids_and_variables.is_empty() 
             && series.component_ids_and_variables.is_empty()
             && series.control_ids.is_empty() {
-            ui.label("(No series selected - drag to configure in P&ID view)");
+            ui.label("(No series selected - select from project to add)");
         }
     }
 }
