@@ -14,6 +14,7 @@ enum DropZone {
     Right,
     Top,
     Bottom,
+    Tab, // Add to container's tabs instead of splitting
 }
 
 /// Split container - can be a leaf (tabs) or a split (horizontal/vertical)
@@ -172,6 +173,21 @@ impl PlotView {
             }
         }
 
+        // Handle tab docking (add to container's tabs)
+        if zone == DropZone::Tab {
+            if let Some(container) = Self::find_container_mut(&mut self.root_container, target_container_id) {
+                if let SplitContainer::Leaf { panel_ids, active_tab, .. } = container {
+                    // Don't add if already in this container
+                    if !panel_ids.contains(&panel_id) {
+                        panel_ids.push(panel_id.clone());
+                        *active_tab = panel_ids.len() - 1;
+                        self.selected_plot_id = Some(panel_id);
+                    }
+                }
+            }
+            return;
+        }
+
         let new_id = self.next_container_id;
         self.next_container_id += 1;
 
@@ -224,6 +240,10 @@ impl PlotView {
                     bottom: Box::new(new_container),
                     ratio: 0.5,
                 },
+                DropZone::Tab => {
+                    // Tab zone should be handled in apply_drop, not here
+                    return;
+                }
             };
             return;
         }
@@ -670,7 +690,7 @@ impl PlotView {
 
         // Draw drop zones if dragging (always show for current container to allow splitting)
         if self.dragging_panel_id.is_some() {
-            self.draw_drop_zones(ui, container_id, rect);
+            self.draw_drop_zones(ui, container_id, rect, tab_height);
         }
 
         // Render active plot
@@ -712,8 +732,15 @@ impl PlotView {
     }
 
     /// Draw drop zones for drag-to-split
-    fn draw_drop_zones(&mut self, ui: &mut egui::Ui, container_id: ContainerId, rect: egui::Rect) {
+    fn draw_drop_zones(&mut self, ui: &mut egui::Ui, container_id: ContainerId, rect: egui::Rect, tab_height: f32) {
         let zone_size = 50.0;
+        
+        // Tab zone is the tab bar area
+        let tab_zone_rect = egui::Rect::from_min_max(
+            rect.min,
+            egui::pos2(rect.max.x, rect.min.y + tab_height),
+        );
+        
         let zones = [
             (DropZone::Left, egui::Rect::from_min_size(
                 rect.min,
@@ -724,7 +751,7 @@ impl PlotView {
                 egui::vec2(zone_size, rect.height()),
             )),
             (DropZone::Top, egui::Rect::from_min_size(
-                rect.min,
+                egui::pos2(rect.min.x, rect.min.y + tab_height),
                 egui::vec2(rect.width(), zone_size),
             )),
             (DropZone::Bottom, egui::Rect::from_min_size(
@@ -763,11 +790,40 @@ impl PlotView {
                         DropZone::Right => "▶",
                         DropZone::Top => "▲",
                         DropZone::Bottom => "▼",
+                        DropZone::Tab => "📌",
                     },
                     egui::FontId::proportional(24.0),
                     egui::Color32::WHITE,
                 );
             }
+        }
+        
+        // Tab zone detection - hover over tab bar to dock in same container
+        let tab_is_hovered = ui.input(|i| {
+            if let Some(pos) = i.pointer.hover_pos() {
+                tab_zone_rect.contains(pos)
+            } else {
+                false
+            }
+        });
+        
+        if tab_is_hovered {
+            self.drop_target = Some((container_id, DropZone::Tab));
+            
+            let alpha = 100;
+            ui.painter().rect_filled(
+                tab_zone_rect,
+                4.0,
+                egui::Color32::from_rgba_unmultiplied(100, 200, 100, alpha),
+            );
+            
+            ui.painter().text(
+                tab_zone_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "📌",
+                egui::FontId::proportional(20.0),
+                egui::Color32::WHITE,
+            );
         }
     }
 
