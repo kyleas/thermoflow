@@ -310,6 +310,15 @@ impl PlotView {
             }
         }
 
+        // Initialize selected_plot_id on first render
+        if self.selected_plot_id.is_none() {
+            if let SplitContainer::Leaf { panel_ids, .. } = &self.root_container {
+                if !panel_ids.is_empty() {
+                    self.selected_plot_id = Some(panel_ids[0].clone());
+                }
+            }
+        }
+
         //Ensure workspace has a default plot if empty
         if self.workspace.panels.is_empty() && selected_run_id.is_some() {
             let panel_id = self.workspace
@@ -317,7 +326,11 @@ impl PlotView {
             
             // Add to root container
             if let SplitContainer::Leaf { panel_ids, .. } = &mut self.root_container {
-                panel_ids.push(panel_id);
+                panel_ids.push(panel_id.clone());
+                // Set as selected on creation
+                if self.selected_plot_id.is_none() {
+                    self.selected_plot_id = Some(panel_id);
+                }
             }
         }
 
