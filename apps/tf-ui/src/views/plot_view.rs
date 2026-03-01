@@ -14,8 +14,11 @@ pub struct PlotView {
     show_template_manager: bool,
     template_rename_target: Option<String>,
     template_rename_input: String,
-    // Series config panel state
-    show_series_config: bool,
+    // Tab/split state
+    active_tab_index: usize,
+    // Series selection overlay
+    show_series_overlay: bool,
+    series_overlay_panel: Option<String>,
 }
 
 impl Default for PlotView {
@@ -29,13 +32,15 @@ impl Default for PlotView {
             show_template_manager: false,
             template_rename_target: None,
             template_rename_input: String::new(),
-            show_series_config: true,
+            active_tab_index: 0,
+            show_series_overlay: false,
+            series_overlay_panel: None,
         }
     }
 }
 
 impl PlotView {
-    /// Show the plotting workspace with drag/drop canvas.
+    /// Show the plotting workspace with tabbed interface and drag-to-split.
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -85,7 +90,11 @@ impl PlotView {
         let (show_rename, show_delete, show_save_template) = ui.horizontal(|ui| {
             if ui.button("➕ New Plot").clicked() {
                 let title = format!("Plot {}", self.workspace.panels.len() + 1);
-                self.workspace.create_panel(title, selected_run_id.clone());
+                let new_id = self.workspace.create_panel(title, selected_run_id.clone());
+                // Select the new plot
+                if let Some(idx) = self.workspace.panel_order.iter().position(|id| id == &new_id) {
+                    self.active_tab_index = idx;
+                }
             }
 
             if ui.button("📋 Templates").clicked() {
@@ -96,13 +105,15 @@ impl PlotView {
             let mut show_delete = false;
             let mut show_save_template = false;
 
-            if let Some(selected_id) = &self.workspace.selected_panel_id {
-                if let Some(panel) = self.workspace.panels.get(selected_id) {
+            // Get active panel
+            if let Some(active_id) = self.workspace.panel_order.get(self.active_tab_index) {
+                if let Some(panel) = self.workspace.panels.get(active_id) {
                     ui.separator();
-                    ui.label(format!("Selected: {}", panel.title));
+                    ui.label(format!("Active: {}", panel.title));
 
-                    if ui.button("⚙ Configure").clicked() {
-                        self.show_series_config = !self.show_series_config;
+                    if ui.button("➕ Add Series").clicked() {
+                        self.show_series_overlay = !self.show_series_overlay;
+                        self.series_overlay_panel = Some(active_id.clone());
                     }
 
                     if ui.button("✏ Rename").clicked() {
@@ -123,21 +134,25 @@ impl PlotView {
 
         // Handle button actions after the borrow
         if show_rename {
-            if let Some(selected_id) = &self.workspace.selected_panel_id.clone() {
-                if let Some(panel) = self.workspace.panels.get(selected_id) {
-                    self.rename_target = Some(selected_id.clone());
+            if let Some(active_id) = self.workspace.panel_order.get(self.active_tab_index).cloned() {
+                if let Some(panel) = self.workspace.panels.get(&active_id) {
+                    self.rename_target = Some(active_id.clone());
                     self.rename_input = panel.title.clone();
                 }
             }
         }
         if show_delete {
-            if let Some(selected_id) = &self.workspace.selected_panel_id.clone() {
-                self.workspace.delete_panel(selected_id);
+            if let Some(active_id) = self.workspace.panel_order.get(self.active_tab_index).cloned() {
+                self.workspace.delete_panel(&active_id);
+                // Adjust tab index if needed
+                if self.active_tab_index >= self.workspace.panel_order.len() && self.active_tab_index > 0 {
+                    self.active_tab_index -= 1;
+                }
             }
         }
         if show_save_template {
-            if let Some(selected_id) = &self.workspace.selected_panel_id.clone() {
-                self.save_panel_as_template(selected_id);
+            if let Some(active_id) = self.workspace.panel_order.get(self.active_tab_index).cloned() {
+                self.save_panel_as_template(&active_id);
             }
         }
 
@@ -165,159 +180,115 @@ impl PlotView {
             ui.separator();
         }
 
-        // ===== SERIES CONFIGURATION =====
-        if self.show_series_config {
-            if let Some(selected_id) = &self.workspace.selected_panel_id.clone() {
-                if let Some(panel) = self.workspace.panels.get(selected_id).cloned() {
-                    egui::CollapsingHeader::new("Series Configuration")
-                        .default_open(true)
-                        .show(ui, |ui| {
+        // ===== TAB BAR =====
+        ui.horizontal(|ui| {
+            for (idx, panel_id) in self.workspace.panel_order.clone().iter().enumerate() {
+                if let Some(panel) = self.workspace.panels.get(panel_id) {
+                    let is_active = idx == self.active_tab_index;
+                    
+                    let tab_text = if is_active {
+                        egui::RichText::new(format!("📊 {}", panel.title))
+                            .strong()
+                            .color(egui::Color32::from_rgb(100, 180, 255))
+                    } else {
+                        egui::RichText::new(format!("📊 {}", panel.title))
+                    };
+
+                    let button = ui.add(
+                        egui::Button::new(tab_text)
+                            .fill(if is_active {
+                                egui::Color32::from_rgb(40, 60, 100)
+                            } else {
+                                egui::Color32::from_gray(30)
+                            })
+                    );
+
+                    if button.clicked() {
+                        self.active_tab_index = idx;
+                    }
+                }
+            }
+        });
+
+        ui.separator();
+
+        // ===== SERIES SELECTION OVERLAY =====
+        if self.show_series_overlay {
+            if let Some(overlay_panel_id) = &self.series_overlay_panel.clone() {
+                if let Some(panel) = self.workspace.panels.get(overlay_panel_id).cloned() {
+                    egui::Window::new("Add Series")
+                        .collapsible(false)
+                        .resizable(true)
+                        .default_width(400.0)
+                        .show(ui.ctx(), |ui| {
+                            ui.label("Select series to add to this plot:");
+                            ui.separator();
+                            
                             egui::ScrollArea::vertical()
-                                .max_height(200.0)
+                                .max_height(400.0)
                                 .show(ui, |ui| {
-                                    self.show_panel_editor(ui, &panel, selected_id);
+                                    self.show_panel_editor(ui, &panel, overlay_panel_id);
                                 });
+
+                            ui.separator();
+                            if ui.button("Close").clicked() {
+                                self.show_series_overlay = false;
+                                self.series_overlay_panel = None;
+                            }
                         });
-                    ui.separator();
                 }
             }
         }
 
-        // ===== INTERACTIVE CANVAS =====
+        // ===== MAIN PLOT AREA (MAXIMIZED) =====
         let available_size = ui.available_size();
-        let (canvas_rect, _response) = ui.allocate_exact_size(available_size, egui::Sense::click());
-
-        // Update workspace dimensions
-        self.workspace.workspace_width = available_size.x;
-        self.workspace.workspace_height = available_size.y;
-
-        // Draw canvas background
-        ui.painter()
-            .rect_filled(canvas_rect, 0.0, egui::Color32::from_gray(15));
-
-        // Render all panels
-        let panel_ids: Vec<String> = self.workspace.panel_order.clone();
-        for panel_id in panel_ids {
-            if let Some(panel) = self.workspace.panels.get(&panel_id).cloned() {
-                self.render_draggable_panel(ui, &panel, &panel_id, canvas_rect);
-            }
-        }
-    }
-
-    /// Render a draggable, resizable panel on the canvas.
-    fn render_draggable_panel(
-        &mut self,
-        ui: &mut egui::Ui,
-        panel: &PlotPanel,
-        panel_id: &str,
-        canvas_rect: egui::Rect,
-    ) {
-        let is_selected = self.workspace.selected_panel_id.as_deref() == Some(panel_id);
-
-        // Calculate panel rect
-        let panel_pos = canvas_rect.min + egui::vec2(panel.x, panel.y);
-        let panel_rect = egui::Rect::from_min_size(
-            panel_pos,
-            egui::vec2(panel.width, panel.height),
-        );
-
-        // Draw panel border
-        let border_color = if is_selected {
-            egui::Color32::from_rgb(100, 150, 255)
-        } else {
-            egui::Color32::from_gray(80)
-        };
-        let border_width = if is_selected { 2.0 } else { 1.0 };
-
-        ui.painter().rect_stroke(
-            panel_rect,
-            4.0,
-            egui::Stroke::new(border_width, border_color),
-        );
-
-        // Draw panel background
-        ui.painter()
-            .rect_filled(panel_rect, 4.0, egui::Color32::from_gray(25));
-
-        // Title bar area
-        let title_height = 30.0;
-        let title_rect = egui::Rect::from_min_size(
-            panel_rect.min,
-            egui::vec2(panel_rect.width(), title_height),
-        );
-
-        // Draw title bar background
-        let title_bg = if is_selected {
-            egui::Color32::from_rgb(40, 60, 100)
-        } else {
-            egui::Color32::from_gray(35)
-        };
-        ui.painter().rect_filled(title_rect, 0.0, title_bg);
-
-        // Draw title text
-        let title_pos = title_rect.min + egui::vec2(8.0, 8.0);
-        ui.painter().text(
-            title_pos,
-            egui::Align2::LEFT_TOP,
-            format!("📊 {}", panel.title),
-            egui::FontId::proportional(14.0),
-            egui::Color32::WHITE,
-        );
-
-        // Handle title bar dragging
-        let title_response = ui.interact(title_rect, ui.id().with(panel_id).with("title"), egui::Sense::drag());
         
-        if title_response.clicked() {
-            self.workspace.select_panel(Some(panel_id.to_string()));
-        }
+        // Get active panel
+        if let Some(active_id) = self.workspace.panel_order.get(self.active_tab_index) {
+            if let Some(panel) = self.workspace.panels.get(active_id).cloned() {
+                let (plot_rect, plot_response) = ui.allocate_exact_size(
+                    available_size,
+                    egui::Sense::click(),
+                );
 
-        if title_response.drag_started() {
-            self.workspace.dragging_panel_id = Some(panel_id.to_string());
-        }
+                // Draw plot background
+                ui.painter()
+                    .rect_filled(plot_rect, 0.0, egui::Color32::from_gray(20));
 
-        if title_response.dragged() {
-            if let Some(panel) = self.workspace.panels.get_mut(panel_id) {
-                let delta = title_response.drag_delta();
-                panel.x += delta.x;
-                panel.y += delta.y;
+                // Show "click to add series" hint if no series
+                let has_series = !panel.series_selection.node_ids_and_variables.is_empty()
+                    || !panel.series_selection.component_ids_and_variables.is_empty()
+                    || !panel.series_selection.control_ids.is_empty();
 
-                // Clamp to canvas
-                panel.x = panel.x.max(0.0).min(canvas_rect.width() - panel.width);
-                panel.y = panel.y.max(0.0).min(canvas_rect.height() - panel.height);
-
-                // Snap to grid (20px grid)
-                const SNAP_THRESHOLD: f32 = 15.0;
-                let snapped_x = (panel.x / 20.0).round() * 20.0;
-                let snapped_y = (panel.y / 20.0).round() * 20.0;
-                if (panel.x - snapped_x).abs() < SNAP_THRESHOLD {
-                    panel.x = snapped_x;
+                if !has_series {
+                    let center = plot_rect.center();
+                    ui.painter().text(
+                        center,
+                        egui::Align2::CENTER_CENTER,
+                        "Click '➕ Add Series' to add traces to this plot",
+                        egui::FontId::proportional(16.0),
+                        egui::Color32::GRAY,
+                    );
                 }
-                if (panel.y - snapped_y).abs() < SNAP_THRESHOLD {
-                    panel.y = snapped_y;
+
+                // Render the plot
+                if has_series {
+                    let mut plot_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(plot_rect)
+                            .layout(egui::Layout::top_down(egui::Align::Min))
+                            .id_salt(active_id),
+                    );
+                    self.render_plot(&mut plot_ui, &panel, &self.cached_timeseries);
+                }
+
+                // Handle click to show series overlay
+                if plot_response.clicked() {
+                    self.show_series_overlay = true;
+                    self.series_overlay_panel = Some(active_id.clone());
                 }
             }
         }
-
-        if title_response.drag_stopped() {
-            self.workspace.dragging_panel_id = None;
-        }
-
-        // Plot content area
-        let plot_rect = egui::Rect::from_min_size(
-            panel_rect.min + egui::vec2(0.0, title_height),
-            egui::vec2(panel_rect.width(), panel_rect.height() - title_height),
-        );
-
-        // Render the actual plot inside the panel
-        // Use a clipped child UI for the plot
-        let id = ui.id().with(panel_id).with("plot_content");
-        let mut plot_ui = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(plot_rect)
-                .layout(egui::Layout::top_down(egui::Align::Min))
-                .id_salt(id),
-        );
-        self.render_plot(&mut plot_ui, panel, &self.cached_timeseries);
     }
 
     /// Render template manager panel.
